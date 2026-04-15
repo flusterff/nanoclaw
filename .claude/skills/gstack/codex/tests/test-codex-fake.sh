@@ -32,4 +32,8 @@ if CODEX_FAKE_RESPONSES="$TMP/responses.jsonl" CODEX_FAKE_EXIT_FILE="$TMP/exit" 
 fi
 grep -q '"status":"BLOCKED"' "$TMP/out.jsonl" || { echo "FAIL: BLOCKED not emitted"; exit 1; }
 
+# Case 3: argv logging
+CODEX_FAKE_LOG="$TMP/argv.log" "$FAKE" exec --json "probe-arg" > /dev/null
+grep -q 'probe-arg' "$TMP/argv.log" || { echo "FAIL: CODEX_FAKE_LOG not written"; exit 1; }
+
 echo "PASS: test-codex-fake"

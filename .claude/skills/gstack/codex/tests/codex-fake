@@ -17,7 +17,8 @@ fi
 if [ -n "${CODEX_FAKE_EXIT_FILE:-}" ] && [ -r "${CODEX_FAKE_EXIT_FILE}" ]; then
   # file should contain a single line like: exit N
   code="$(awk '/^exit/{print $2; exit}' "${CODEX_FAKE_EXIT_FILE}")"
-  exit "${code:-0}"
+  [ -n "$code" ] || { echo "codex-fake: CODEX_FAKE_EXIT_FILE has no 'exit N' line" >&2; exit 2; }
+  exit "${code}"
 fi
 
 exit 0
