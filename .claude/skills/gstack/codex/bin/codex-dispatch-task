@@ -63,7 +63,7 @@ tmp_out="$(mktemp)"
 trap 'rm -f "$tmp_out"' EXIT
 
 set +e
-"${TO_CMD[@]}" "$CODEX" "${args[@]}" "$prompt" > "$tmp_out" 2>&1
+"${TO_CMD[@]+"${TO_CMD[@]}"}" "$CODEX" "${args[@]}" "$prompt" > "$tmp_out" 2>&1
 rc=$?
 set -e
 
