@@ -47,6 +47,12 @@ with_lock() {
     flock -u 9
   else
     for _ in $(seq 1 50); do
+      if [ -r "$LOCK_FILE" ]; then
+        held_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+        if [ -n "$held_pid" ] && ! kill -0 "$held_pid" 2>/dev/null; then
+          rm -f "$LOCK_FILE"
+        fi
+      fi
       if (set -C; echo $$ > "$LOCK_FILE") 2>/dev/null; then
         trap 'rm -f "$LOCK_FILE"' EXIT
         "$@"
@@ -61,11 +67,13 @@ with_lock() {
 
 write_atomic() {
   local tmp; tmp="$(mktemp "$STATE_DIR/.state.XXXXXX")"
-  cat > "$tmp"
+  if ! cat > "$tmp"; then rm -f "$tmp"; return 2; fi
   if ! jq . "$tmp" > /dev/null 2>&1; then
     rm -f "$tmp"; echo "ERROR: refusing to write invalid JSON" >&2; return 2
   fi
-  mv "$tmp" "$STATE_FILE"
+  if ! mv "$tmp" "$STATE_FILE"; then
+    rm -f "$tmp"; return 2
+  fi
 }
 
 stamp_updated() {
