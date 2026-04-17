@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Squash-merge each passed-gate task branch into the base branch in ascending
+# task-number order. On conflict, abort that merge, mark the task BLOCKED with
+# post-merge-conflict, and stop the wave.
+#
+# Flags:
+#   --work-dir <dir>
+#   --wave <N>
+#   --base <ref>
+#   --plan-json <file>
+#
+# After each successful merge, record `final_commit_on_base` in state.json and
+# run the post-wave global test command. If red, escalate.
+set -euo pipefail
+
+WORK="" WAVE="" BASE="" PLAN_JSON=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --work-dir)  WORK="$2"; shift 2 ;;
+    --wave)      WAVE="$2"; shift 2 ;;
+    --base)      BASE="$2"; shift 2 ;;
+    --plan-json) PLAN_JSON="$2"; shift 2 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+: "${WORK:?}" "${WAVE:?}" "${BASE:?}" "${PLAN_JSON:?}"
+
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BIN="$SKILL_DIR/bin"
+
+tasks="$(jq -r --argjson w "$WAVE" '.waves[] | select(.wave == $w) | .tasks | sort | .[]' "$PLAN_JSON")"
+plan_slug="$(basename "$WORK")"
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+git checkout -q "$BASE"
+
+for n in $tasks; do
+  slug="$(jq -r --argjson n "$n" '.tasks[] | select(.num == $n) | .slug' "$PLAN_JSON")"
+  heading="$(jq -r --argjson n "$n" '.tasks[] | select(.num == $n) | .heading' "$PLAN_JSON")"
+  branch="codex/$plan_slug/$slug"
+
+  if ! git merge --squash "$branch" 2>/dev/null; then
+    git merge --abort 2>/dev/null || true
+    "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$n" --status blocked
+    echo "ESCALATE wave=$WAVE task=$n reason=post-merge-conflict" >&2
+    exit 2
+  fi
+
+  msg="task $n: $heading
+
+via /codex implement
+
+Co-Authored-By: Codex (gpt-5-codex) <noreply@openai.com>
+Co-Authored-By: Claude (claude-opus-4-6) <noreply@anthropic.com>"
+  git commit -qm "$msg"
+  sha="$(git rev-parse HEAD)"
+  "$BIN/codex-state" set-task-commit "$WORK" --wave "$WAVE" --task "$n" --sha "$sha"
+  "$BIN/codex-state" set-status      "$WORK" --wave "$WAVE" --task "$n" --status merged
+
+  "$BIN/codex-worktree" teardown "$WORK" "$slug" > /dev/null
+done
+
+"$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
+
+global_test="$(jq -r '.test_command' "$PLAN_JSON")"
+if [ -n "$global_test" ] && [ "$global_test" != "null" ]; then
+  if ! bash -c "$global_test"; then
+    echo "ESCALATE wave=$WAVE reason=post-wave-global-test-failed" >&2
+    exit 2
+  fi
+fi
+
+exit 0
