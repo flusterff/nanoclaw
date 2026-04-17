@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Stage 2 gate: run `codex review --base <base>` in a worktree, emit PASS or FAIL.
+# On FAIL, write the verbatim review output to --findings-file.
+set -euo pipefail
+
+CODEX="${CODEX_BIN:-codex}"
+WT=""; BASE=""; FINDINGS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --worktree)       WT="$2"; shift 2 ;;
+    --base)           BASE="$2"; shift 2 ;;
+    --findings-file)  FINDINGS="$2"; shift 2 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+: "${WT:?}" "${BASE:?}" "${FINDINGS:?}"
+
+tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+
+# The existing /codex skill runs:
+#   codex review "..." --base <base> -c 'model_reasoning_effort="high"' --enable web_search_cached
+# We invoke the same CLI directly here (we don't want the full skill preamble).
+(cd "$WT" && "$CODEX" review \
+  "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. Do NOT modify agents/openai.yaml. Stay focused on repository code only." \
+  --base "$BASE" \
+  -c 'model_reasoning_effort="high"' \
+  --enable web_search_cached) > "$tmp" 2>&1
+
+# Pass/fail heuristic: look for severity markers or the literal word FAIL / "blocking issue".
+if grep -Eq '^\[(P0|P1|CRITICAL|MAJOR)\]|^FAIL$|^[[:space:]]*blocking issue' "$tmp"; then
+  cp "$tmp" "$FINDINGS"
+  echo "FAIL"
+  exit 0
+fi
+
+echo "PASS"
