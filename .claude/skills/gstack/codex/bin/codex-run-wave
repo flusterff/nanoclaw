@@ -65,22 +65,23 @@ $(cat "$findings")
 Fix and re-verify."
   fi
 
-  awk -v goal="$goal" -v arch="$arch" -v heading="$heading" \
-      -v body="$body" -v prior="$prior_section" \
-      -v wt="$WORK/$slug" \
-      -v fb="$forbidden" -v tc="$test_cmd" '
-    {
-      gsub(/\{\{GOAL\}\}/, goal)
-      gsub(/\{\{ARCHITECTURE\}\}/, arch)
-      gsub(/\{\{TASK_HEADING\}\}/, heading)
-      gsub(/\{\{TASK_BODY\}\}/, body)
-      gsub(/\{\{PRIOR_ATTEMPT_FINDINGS\}\}/, prior)
-      gsub(/\{\{WORKTREE_PATH\}\}/, wt)
-      gsub(/\{\{FORBIDDEN_FILES\}\}/, fb)
-      gsub(/\{\{TEST_COMMAND\}\}/, tc)
-      print
-    }
-  ' "$PROMPT_TMPL"
+  # awk -v can't take multi-line values; ship via env + ENVIRON[] instead.
+  RP_GOAL="$goal" RP_ARCH="$arch" RP_HEADING="$heading" \
+    RP_BODY="$body" RP_PRIOR="$prior_section" \
+    RP_WT="$WORK/$slug" RP_FB="$forbidden" RP_TC="$test_cmd" \
+    awk '
+      {
+        gsub(/\{\{GOAL\}\}/,                   ENVIRON["RP_GOAL"])
+        gsub(/\{\{ARCHITECTURE\}\}/,           ENVIRON["RP_ARCH"])
+        gsub(/\{\{TASK_HEADING\}\}/,           ENVIRON["RP_HEADING"])
+        gsub(/\{\{TASK_BODY\}\}/,              ENVIRON["RP_BODY"])
+        gsub(/\{\{PRIOR_ATTEMPT_FINDINGS\}\}/, ENVIRON["RP_PRIOR"])
+        gsub(/\{\{WORKTREE_PATH\}\}/,          ENVIRON["RP_WT"])
+        gsub(/\{\{FORBIDDEN_FILES\}\}/,        ENVIRON["RP_FB"])
+        gsub(/\{\{TEST_COMMAND\}\}/,           ENVIRON["RP_TC"])
+        print
+      }
+    ' "$PROMPT_TMPL"
 }
 
 # Precompute and cache each task's forbidden-files list in $WORK/forbidden.<n>

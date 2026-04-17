@@ -69,10 +69,13 @@ set -e
 
 cat "$tmp_out" >> "$LOG"
 
-jq -r 'select(.session_id != null) | .session_id' "$tmp_out" 2>/dev/null | tail -n1 > "$SID_FILE.new" || true
+# jq may return non-zero on non-JSON output (e.g. test stubs that just echo
+# "DONE"). Under set -euo pipefail this would abort the script; tolerate it.
+{ jq -r 'select(.session_id != null) | .session_id' "$tmp_out" 2>/dev/null || true; } \
+  | tail -n1 > "$SID_FILE.new" || true
 if [ -s "$SID_FILE.new" ]; then mv "$SID_FILE.new" "$SID_FILE"; else rm -f "$SID_FILE.new"; fi
 
-final_text="$(jq -r 'select(.text != null) | .text' "$tmp_out" 2>/dev/null | tail -n1)"
+final_text="$({ jq -r 'select(.text != null) | .text' "$tmp_out" 2>/dev/null || true; } | tail -n1)"
 if [ -z "$final_text" ]; then
   final_text="$(tail -n 5 "$tmp_out")"
 fi
