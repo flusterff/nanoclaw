@@ -278,14 +278,23 @@ process_one() {
     local fb_gen fb_marker fb_result
     fb_marker=""
     fb_result=""
-    # Find the newest marker (by mtime) across both layouts. Use a
-    # NUL-delimited sort to stay safe on paths containing spaces — the
-    # earlier `for f in $(ls -t ...)` pattern word-split paths like
-    # "/var/Application Support/.../W.N.json".
-    fb_marker="$(find "$WORK" -maxdepth 1 -type f \
-      \( -name "needs-claude-fallback.$WAVE.$num.*.json" \
-         -o -name "needs-claude-fallback.$WAVE.$num.json" \) \
-      -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -n1)"
+    # Find the newest marker (by mtime) across both layouts. Use python
+    # for cross-platform mtime sort — `ls -t` word-splits on spaces and
+    # GNU xargs without `-r` runs `ls` even with no input (which would
+    # then return the cwd listing and false-match the first file).
+    fb_marker="$(WORK="$WORK" WAVE="$WAVE" NUM="$num" python3 - <<'PYEOF'
+import os, glob, sys
+w = os.environ["WORK"]; wave = os.environ["WAVE"]; num = os.environ["NUM"]
+cands = (
+    glob.glob(f"{w}/needs-claude-fallback.{wave}.{num}.*.json")
+    + glob.glob(f"{w}/needs-claude-fallback.{wave}.{num}.json")
+)
+cands = [c for c in cands if os.path.isfile(c)]
+if cands:
+    cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    sys.stdout.write(cands[0])
+PYEOF
+)"
     [ -n "$fb_marker" ] && [ -r "$fb_marker" ] || fb_marker=""
     if [ -n "$fb_marker" ]; then
       # Derived result path must match marker generation exactly.
@@ -323,10 +332,13 @@ process_one() {
       # through to the main wait-loop below. If not, assume the worker is
       # dead and re-gate / emit fresh.
       if [ -n "$fb_marker" ] && [ -r "$fb_marker" ]; then
+        # Honor the same 30-min budget as the initial fallback handoff —
+        # the original Claude subagent may still legitimately be working
+        # after an orchestrator restart.
         local in_flight_wait=0
         local in_flight_result
         in_flight_result="$(echo "$fb_marker" | sed 's/needs-claude-fallback/claude-fallback-result/')"
-        while [ ! -r "$in_flight_result" ] && [ "$in_flight_wait" -lt 300 ]; do
+        while [ ! -r "$in_flight_result" ] && [ "$in_flight_wait" -lt 1800 ]; do
           sleep 5; in_flight_wait=$((in_flight_wait + 5))
         done
         if [ -r "$in_flight_result" ]; then
