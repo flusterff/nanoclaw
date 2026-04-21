@@ -181,11 +181,22 @@ case "$cmd" in
       local w; w="$(arg wave)"
       local t; t="$(arg task)"
       local sha; sha="$(arg sha)"
-      jq --argjson w "$w" --argjson t "$t" --arg sha "$sha" \
-         --arg now "$(stamp_updated)" '
-        .last_updated_at = $now
-        | (.waves[] | select(.wave == $w) | .tasks[] | select(.num == $t) | .final_commit_on_base) = $sha
-      ' "$STATE_FILE" | write_atomic
+      # An empty --sha clears the recorded commit to null (used by the
+      # --only-task canary auto-revert path so --rollback doesn't try to
+      # revert an already-reverted squash).
+      if [ -z "$sha" ]; then
+        jq --argjson w "$w" --argjson t "$t" \
+           --arg now "$(stamp_updated)" '
+          .last_updated_at = $now
+          | (.waves[] | select(.wave == $w) | .tasks[] | select(.num == $t) | .final_commit_on_base) = null
+        ' "$STATE_FILE" | write_atomic
+      else
+        jq --argjson w "$w" --argjson t "$t" --arg sha "$sha" \
+           --arg now "$(stamp_updated)" '
+          .last_updated_at = $now
+          | (.waves[] | select(.wave == $w) | .tasks[] | select(.num == $t) | .final_commit_on_base) = $sha
+        ' "$STATE_FILE" | write_atomic
+      fi
     }
     with_lock do_sc
     ;;

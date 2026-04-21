@@ -225,23 +225,31 @@ if [ -n "$ONLY_TASK" ]; then
     # peer-missing. If the pre-merge state passes, the canary
     # introduced the regression — FAIL and revert the squash commit.
     if ! bash -c "$canary_test" >/dev/null 2>&1; then
-      # Stash the current HEAD, step back one commit (the base before
-      # the canary squash), run the test, step back.
+      # Run the pre-canary probe in a DISPOSABLE worktree so tests that
+      # write files don't dirty the main worktree (which would make the
+      # git-checkout-back fail and leave HEAD detached).
       canary_commit_sha="$(git rev-parse HEAD)"
       pre_canary_sha="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
       pre_canary_passes=0
       if [ -n "$pre_canary_sha" ]; then
-        git checkout -q "$pre_canary_sha"
-        if bash -c "$canary_test" >/dev/null 2>&1; then
-          pre_canary_passes=1
+        probe_wt="$WORK/.canary-probe.$$"
+        rm -rf "$probe_wt" 2>/dev/null || true
+        if git worktree add -q --detach "$probe_wt" "$pre_canary_sha" 2>/dev/null; then
+          if (cd "$probe_wt" && bash -c "$canary_test") >/dev/null 2>&1; then
+            pre_canary_passes=1
+          fi
+          git worktree remove -f "$probe_wt" 2>/dev/null || rm -rf "$probe_wt" 2>/dev/null || true
+          git worktree prune 2>/dev/null || true
         fi
-        git checkout -q "$canary_commit_sha"
       fi
       if [ "$pre_canary_passes" -eq 1 ]; then
         echo "ESCALATE --only-task canary: plan-level test passed on BASE but" >&2
         echo "  fails after this canary merged. The canary task itself broke" >&2
         echo "  an existing invariant. Reverting the squash commit…" >&2
         git revert --no-edit HEAD > /dev/null 2>&1 || true
+        # Clear the recorded final_commit_on_base so --rollback doesn't
+        # try to revert the already-reverted squash a second time.
+        "$BIN/codex-state" set-task-commit "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --sha ""
         "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --status escalated
         echo "  Worktree preserved at $WORK/<slug>." >&2
         exit 2
