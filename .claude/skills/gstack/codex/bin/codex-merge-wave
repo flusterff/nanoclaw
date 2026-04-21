@@ -216,27 +216,36 @@ if [ -n "$ONLY_TASK" ]; then
     [ -z "$sl" ] && continue
     "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
   done
-  # Wave completion after a successful --only-task canary: if every task
-  # in the plan is now in state 'merged' (i.e. this invocation happened
-  # to be the last remaining peer), mark the wave completed. Otherwise
-  # stay in_progress — peers still need to run.
-  all_merged=1
-  for tn in $(jq -r '.tasks[].num' "$PLAN_JSON"); do
+  # Wave completion after a successful --only-task canary: check whether
+  # every task IN THIS CURRENT WAVE is now in state 'merged'. If so, mark
+  # the wave completed so subsequent --resume runs don't revisit it.
+  # (We don't care about peers in other waves here — that's their wave's
+  # responsibility to complete.)
+  wave_all_merged=1
+  for tn in $(jq -r --argjson w "$WAVE" \
+    '.waves[] | select(.wave == $w) | .tasks[]' "$PLAN_JSON"); do
     tstat="$(jq -r --argjson n "$tn" \
       '.waves[].tasks[] | select(.num == $n) | .status' \
       "$STATE_JSON" 2>/dev/null || echo "")"
-    [ "$tstat" = "merged" ] || { all_merged=0; break; }
+    [ "$tstat" = "merged" ] || { wave_all_merged=0; break; }
   done
-  if [ "$all_merged" -eq 1 ]; then
+  if [ "$wave_all_merged" -eq 1 ]; then
     "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
   fi
 elif [ "$is_final_wave" -eq 1 ]; then
   # Final wave green: tear down every worktree accumulated across the plan.
+  # Also delete the matching codex/<plan>/<slug> branch unconditionally —
+  # if the worktree dir was removed out-of-band (user inspection, manual
+  # cleanup), the branch would otherwise survive and block the next run
+  # with "fatal: a branch named ... already exists".
   all_slugs="$(jq -r '.tasks[].slug' "$PLAN_JSON")"
   for sl in $all_slugs; do
     [ -z "$sl" ] && continue
     if [ -d "$WORK/$sl" ]; then
       "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
+    fi
+    if git show-ref --verify --quiet "refs/heads/codex/$plan_slug/$sl"; then
+      git branch -D "codex/$plan_slug/$sl" > /dev/null 2>&1 || true
     fi
   done
 fi
