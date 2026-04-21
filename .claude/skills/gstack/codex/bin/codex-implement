@@ -79,10 +79,25 @@ PLAN_JSON="$WORK/plan.json"
 "$BIN/codex-parse-plan" "$PLAN" > "$PLAN_JSON"
 
 if [ -z "$BASE" ]; then
-  if git show-ref --verify --quiet refs/remotes/origin/main; then
+  # Prefer a LOCAL branch as the base. codex-merge-wave does
+  # `git checkout -q "$BASE"` and commits into it; a remote ref like
+  # origin/main would check out in detached HEAD and the squash commits
+  # would never advance any named branch. Local `main` first, then
+  # local `master`, and only fall back to `origin/main` as a last resort
+  # with a warning.
+  if git show-ref --verify --quiet refs/heads/main; then
+    BASE="main"
+  elif git show-ref --verify --quiet refs/heads/master; then
+    BASE="master"
+  elif git show-ref --verify --quiet refs/remotes/origin/main; then
+    echo "WARNING: no local main/master branch; defaulting to origin/main." >&2
+    echo "         codex-merge-wave will commit onto a detached HEAD." >&2
+    echo "         Pass --base <local-branch> to avoid this." >&2
     BASE="origin/main"
   else
-    BASE="main"
+    echo "ERROR: no local main/master branch and no origin/main remote." >&2
+    echo "       Pass --base <local-branch> explicitly." >&2
+    exit 2
   fi
 fi
 
