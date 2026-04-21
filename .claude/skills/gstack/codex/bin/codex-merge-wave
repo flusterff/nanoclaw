@@ -147,8 +147,15 @@ if [ -z "$ONLY_TASK" ]; then
   # Running the test earlier would break any plan where a later wave
   # produces the artifact the test inspects.
 
+  PLAN_TEST_OK_SENTINEL="$WORK/plan-test-passed"
+
   if [ "$is_final_wave" -eq 1 ]; then
     global_test="$(jq -r '.test_command' "$PLAN_JSON")"
+    # If the sentinel exists, the plan test already passed on a prior run;
+    # don't re-run a potentially non-idempotent command.
+    if [ -r "$PLAN_TEST_OK_SENTINEL" ]; then
+      global_test=""
+    fi
     if [ -n "$global_test" ] && [ "$global_test" != "null" ]; then
       if ! bash -c "$global_test"; then
         "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status in_progress
@@ -168,6 +175,10 @@ if [ -z "$ONLY_TASK" ]; then
         echo "      after fixing the plan itself." >&2
         exit 2
       fi
+      # Plan test just passed — persist the flag so later --resume runs
+      # (and a follow-up --only-task) don't re-execute a potentially
+      # non-idempotent command.
+      touch "$PLAN_TEST_OK_SENTINEL"
     fi
   fi
   "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
@@ -199,7 +210,12 @@ if [ -n "$ONLY_TASK" ]; then
   canary_total_tasks="$(jq '.tasks | length' "$PLAN_JSON")"
   # Track whether the plan-level test already passed here so the completion
   # branch below doesn't re-run a potentially non-idempotent command.
+  # Persist the "already passed" flag in a sentinel file so a later --resume
+  # --only-task invocation also doesn't re-run the test (the same
+  # non-idempotent concern, scaled across processes).
+  PLAN_TEST_OK_SENTINEL="$WORK/plan-test-passed"
   canary_plan_test_passed=0
+  [ -r "$PLAN_TEST_OK_SENTINEL" ] && canary_plan_test_passed=1
   if [ -n "$canary_test" ] && [ "$canary_test" != "null" ] && [ "$canary_total_tasks" != "1" ]; then
     # Multi-task plan: a failing plan-level test is only acceptable if
     # it's because peer tasks haven't merged yet. Check whether EVERY
@@ -237,6 +253,7 @@ if [ -n "$ONLY_TASK" ]; then
       exit 0
     else
       canary_plan_test_passed=1
+      touch "$PLAN_TEST_OK_SENTINEL"
     fi
   elif [ -n "$canary_test" ] && [ "$canary_test" != "null" ] && [ "$canary_total_tasks" = "1" ]; then
     # Single-task plan: plan-level test IS the whole plan's acceptance
@@ -249,6 +266,7 @@ if [ -n "$ONLY_TASK" ]; then
       exit 2
     fi
     canary_plan_test_passed=1
+    touch "$PLAN_TEST_OK_SENTINEL"
   fi
   # Canary green (or no plan test): tear down.
   for sl in $merged_this_run_slugs; do
@@ -285,12 +303,17 @@ if [ -n "$ONLY_TASK" ]; then
       if [ "$plan_all_merged" -eq 1 ]; then
         plan_test="$(jq -r '.test_command' "$PLAN_JSON")"
         plan_test_ok=1
-        # If the canary above already ran the plan test and passed, don't
-        # run it a second time — non-idempotent tests (e.g. one that creates
+        # If the canary above already ran the plan test and passed (either
+        # in this process or on a prior run via the sentinel), don't run
+        # it a second time — non-idempotent tests (e.g. one that creates
         # a sentinel file on first run) would pass once then fail here.
         if [ -n "$plan_test" ] && [ "$plan_test" != "null" ] && \
            [ "$canary_plan_test_passed" -ne 1 ]; then
-          if ! bash -c "$plan_test" >/dev/null 2>&1; then plan_test_ok=0; fi
+          if ! bash -c "$plan_test" >/dev/null 2>&1; then
+            plan_test_ok=0
+          else
+            touch "$PLAN_TEST_OK_SENTINEL"
+          fi
         fi
         if [ "$plan_test_ok" -eq 1 ]; then
           "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
@@ -336,7 +359,11 @@ if [ -n "$ONLY_TASK" ]; then
           plan_test_ok=1
           if [ -n "$plan_test" ] && [ "$plan_test" != "null" ] && \
              [ "$canary_plan_test_passed" -ne 1 ]; then
-            if ! bash -c "$plan_test" >/dev/null 2>&1; then plan_test_ok=0; fi
+            if ! bash -c "$plan_test" >/dev/null 2>&1; then
+              plan_test_ok=0
+            else
+              touch "$PLAN_TEST_OK_SENTINEL"
+            fi
           fi
           if [ "$plan_test_ok" -eq 1 ]; then
             "$BIN/codex-state" set-wave-status "$WORK" --wave "$last_wave" --status completed
