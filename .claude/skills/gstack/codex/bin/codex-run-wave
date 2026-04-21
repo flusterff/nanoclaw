@@ -278,12 +278,15 @@ process_one() {
     local fb_gen fb_marker fb_result
     fb_marker=""
     fb_result=""
-    # Find the newest marker (by mtime) across both layouts.
-    for f in $(ls -t "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
-                       "$WORK"/needs-claude-fallback.$WAVE.$num.json \
-                       2>/dev/null); do
-      [ -r "$f" ] && fb_marker="$f" && break
-    done
+    # Find the newest marker (by mtime) across both layouts. Use a
+    # NUL-delimited sort to stay safe on paths containing spaces — the
+    # earlier `for f in $(ls -t ...)` pattern word-split paths like
+    # "/var/Application Support/.../W.N.json".
+    fb_marker="$(find "$WORK" -maxdepth 1 -type f \
+      \( -name "needs-claude-fallback.$WAVE.$num.*.json" \
+         -o -name "needs-claude-fallback.$WAVE.$num.json" \) \
+      -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -n1)"
+    [ -n "$fb_marker" ] && [ -r "$fb_marker" ] || fb_marker=""
     if [ -n "$fb_marker" ]; then
       # Derived result path must match marker generation exactly.
       fb_result="$(echo "$fb_marker" | sed 's/needs-claude-fallback/claude-fallback-result/')"
@@ -292,11 +295,11 @@ process_one() {
       # No marker: check if a matching result without a surviving marker
       # is present (marker could have been rm'd by the worker). Use the
       # NEWEST result file if multiple exist — older ones are stale replies.
-      for f in $(ls -t "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
-                         "$WORK"/claude-fallback-result.$WAVE.$num.json \
-                         2>/dev/null); do
-        [ -r "$f" ] && fb_result="$f" && break
-      done
+      fb_result="$(find "$WORK" -maxdepth 1 -type f \
+        \( -name "claude-fallback-result.$WAVE.$num.*.json" \
+           -o -name "claude-fallback-result.$WAVE.$num.json" \) \
+        -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -n1)"
+      [ -n "$fb_result" ] && [ -r "$fb_result" ] || fb_result=""
     fi
 
     # If no marker AND no result survived, or if a marker survived with no

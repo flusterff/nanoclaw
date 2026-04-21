@@ -296,5 +296,13 @@ for wave in $wave_nums; do
   fi
 done
 
-echo "all waves complete. merged commits on $BASE:"
+if [ -n "$ONLY_TASK" ]; then
+  # Canary run — only one task merged by design. Don't claim full
+  # completion; the rest of the plan still needs --resume.
+  echo "--only-task $ONLY_TASK complete. Plan is NOT finished — run"
+  echo "'codex-implement --resume <plan>' (or another --only-task) to"
+  echo "merge the remaining tasks. Merged commits on $BASE so far:"
+else
+  echo "all waves complete. merged commits on $BASE:"
+fi
 jq -r '.waves[].tasks[] | select(.final_commit_on_base != null) | "  \(.num) \(.slug) → \(.final_commit_on_base[0:8])"' "$STATE"
