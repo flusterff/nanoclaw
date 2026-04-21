@@ -224,31 +224,55 @@ if [ -n "$ONLY_TASK" ]; then
     # canary merge). If the pre-merge state ALSO fails, the failure is
     # peer-missing. If the pre-merge state passes, the canary
     # introduced the regression — FAIL and revert the squash commit.
-    if ! bash -c "$canary_test" >/dev/null 2>&1; then
-      # Run the pre-canary probe in a DISPOSABLE worktree so tests that
-      # write files don't dirty the main worktree (which would make the
-      # git-checkout-back fail and leave HEAD detached).
-      canary_commit_sha="$(git rev-parse HEAD)"
-      pre_canary_sha="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+    # Run BOTH the post-canary test and the pre-canary probe in DISPOSABLE
+    # worktrees so side-effecting plan tests (ones that write files before
+    # failing) don't dirty the main checkout. A dirty main checkout would
+    # block the next --resume on its working-tree-clean preflight.
+    canary_commit_sha="$(git rev-parse HEAD)"
+    pre_canary_sha="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+
+    post_wt="$WORK/.canary-post.$$"
+    rm -rf "$post_wt" 2>/dev/null || true
+    post_passes=0
+    if git worktree add -q --detach "$post_wt" "$canary_commit_sha" 2>/dev/null; then
+      if (cd "$post_wt" && bash -c "$canary_test") >/dev/null 2>&1; then
+        post_passes=1
+      fi
+      git worktree remove -f "$post_wt" 2>/dev/null || rm -rf "$post_wt" 2>/dev/null || true
+      git worktree prune 2>/dev/null || true
+    fi
+
+    if [ "$post_passes" -eq 0 ]; then
       pre_canary_passes=0
       if [ -n "$pre_canary_sha" ]; then
-        probe_wt="$WORK/.canary-probe.$$"
-        rm -rf "$probe_wt" 2>/dev/null || true
-        if git worktree add -q --detach "$probe_wt" "$pre_canary_sha" 2>/dev/null; then
-          if (cd "$probe_wt" && bash -c "$canary_test") >/dev/null 2>&1; then
+        pre_wt="$WORK/.canary-pre.$$"
+        rm -rf "$pre_wt" 2>/dev/null || true
+        if git worktree add -q --detach "$pre_wt" "$pre_canary_sha" 2>/dev/null; then
+          if (cd "$pre_wt" && bash -c "$canary_test") >/dev/null 2>&1; then
             pre_canary_passes=1
           fi
-          git worktree remove -f "$probe_wt" 2>/dev/null || rm -rf "$probe_wt" 2>/dev/null || true
+          git worktree remove -f "$pre_wt" 2>/dev/null || rm -rf "$pre_wt" 2>/dev/null || true
           git worktree prune 2>/dev/null || true
         fi
       fi
       if [ "$pre_canary_passes" -eq 1 ]; then
         echo "ESCALATE --only-task canary: plan-level test passed on BASE but" >&2
         echo "  fails after this canary merged. The canary task itself broke" >&2
-        echo "  an existing invariant. Reverting the squash commit…" >&2
-        git revert --no-edit HEAD > /dev/null 2>&1 || true
-        # Clear the recorded final_commit_on_base so --rollback doesn't
-        # try to revert the already-reverted squash a second time.
+        echo "  an existing invariant. Undoing the squash commit…" >&2
+        # Hard-reset to the pre-canary state. This is safe here because we
+        # just made the squash commit ourselves, nothing else has happened
+        # since, and the disposable-worktree checks keep the main checkout
+        # clean. reset is atomic: no partial failure to worry about.
+        if ! git reset --hard "$pre_canary_sha" > /dev/null 2>&1; then
+          echo "  ERROR: failed to reset $BASE to $pre_canary_sha." >&2
+          echo "  Bad commit may still be on $BASE — inspect manually and" >&2
+          echo "  use codex-implement --rollback to revert." >&2
+          # Leave the commit recorded so --rollback can still revert it.
+          "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --status escalated
+          exit 2
+        fi
+        # Reset succeeded; clear the recorded final_commit_on_base so
+        # --rollback doesn't try to revert a commit that no longer exists.
         "$BIN/codex-state" set-task-commit "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --sha ""
         "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --status escalated
         echo "  Worktree preserved at $WORK/<slug>." >&2
@@ -271,8 +295,20 @@ if [ -n "$ONLY_TASK" ]; then
     fi
   elif [ -n "$canary_test" ] && [ "$canary_test" != "null" ] && [ "$canary_total_tasks" = "1" ]; then
     # Single-task plan: plan-level test IS the whole plan's acceptance
-    # test. Failure is a real bug.
-    if ! bash -c "$canary_test"; then
+    # test. Failure is a real bug. Run in a disposable worktree so
+    # side-effecting tests don't dirty the main checkout.
+    st_canary_sha="$(git rev-parse HEAD)"
+    st_wt="$WORK/.canary-single.$$"
+    rm -rf "$st_wt" 2>/dev/null || true
+    st_passes=0
+    if git worktree add -q --detach "$st_wt" "$st_canary_sha" 2>/dev/null; then
+      if (cd "$st_wt" && bash -c "$canary_test"); then
+        st_passes=1
+      fi
+      git worktree remove -f "$st_wt" 2>/dev/null || rm -rf "$st_wt" 2>/dev/null || true
+      git worktree prune 2>/dev/null || true
+    fi
+    if [ "$st_passes" -eq 0 ]; then
       echo "ESCALATE --only-task canary: plan-level test failed." >&2
       echo "  Squash commit is already on $BASE — inspect, fix, and use" >&2
       echo "  codex-implement --rollback if you want to revert it." >&2
