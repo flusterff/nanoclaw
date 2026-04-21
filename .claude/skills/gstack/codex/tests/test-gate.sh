@@ -21,8 +21,9 @@ export CODEX_BIN="$TMP/fakes/codex"
 
 WORK="$TMP/work"; mkdir -p "$WORK"
 
-# Pre-write the spec-check-result so Stage 3 returns immediately.
-cat > "$WORK/spec-check-result.1.1.json" <<'EOF'
+# Pre-write the per-attempt spec-check-result so Stage 3 returns immediately.
+# Markers are versioned per attempt (1 by default via GATE_ATTEMPT).
+cat > "$WORK/spec-check-result.1.1.1.json" <<'EOF'
 {"verdict":"PASS","findings_text":"all spec requirements met","completed_at":"now"}
 EOF
 

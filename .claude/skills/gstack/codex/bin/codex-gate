@@ -39,8 +39,13 @@ while [ $# -gt 0 ]; do
 done
 : "${WT:?}" "${WORK:?}" "${WAVE:?}" "${TASK:?}" "${SLUG:?}" "${BASE:?}" "${TEST_CMD:?}"
 
-MARKER_IN="$WORK/needs-spec-check.$WAVE.$TASK.json"
-MARKER_OUT="$WORK/spec-check-result.$WAVE.$TASK.json"
+# Marker paths are versioned per attempt so a delayed Claude response from
+# attempt N cannot be consumed by attempt N+1 against the wrong worktree
+# state. The pre-attempt marker is used once per attempt; Claude sees the
+# attempt number in the filename and writes a matching result.
+ATTEMPT_NUM="${GATE_ATTEMPT:-1}"
+MARKER_IN="$WORK/needs-spec-check.$WAVE.$TASK.$ATTEMPT_NUM.json"
+MARKER_OUT="$WORK/spec-check-result.$WAVE.$TASK.$ATTEMPT_NUM.json"
 
 findings_file() {
   local attempt="$1"

@@ -75,36 +75,56 @@ preflight() {
 preflight
 
 LOCK="$WORK/lock"
+PIDFILE="$WORK/lock.pid"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK"
   if ! flock -n 9; then
     echo "ERROR: another /codex implement run is active on this plan." >&2
     exit 2
   fi
+else
+  # macOS and other systems without flock: fall back to a PID file with a
+  # liveness check. Two concurrent /codex implement runs against the same
+  # plan would otherwise race on $WORK (state.json, markers, sub-worktrees)
+  # and corrupt each other.
+  if [ -r "$PIDFILE" ]; then
+    old_pid="$(cat "$PIDFILE" 2>/dev/null || echo "")"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      echo "ERROR: another /codex implement run (pid $old_pid) is active on this plan." >&2
+      exit 2
+    fi
+    # stale pid file
+    rm -f "$PIDFILE"
+  fi
+  echo "$$" > "$PIDFILE"
+  trap 'rm -f "$PIDFILE"' EXIT
 fi
 
 PLAN_JSON="$WORK/plan.json"
 "$BIN/codex-parse-plan" "$PLAN" > "$PLAN_JSON"
 
 if [ -z "$BASE" ]; then
-  # Prefer a LOCAL branch as the base. codex-merge-wave does
-  # `git checkout -q "$BASE"` and commits into it; a remote ref like
-  # origin/main would check out in detached HEAD and the squash commits
-  # would never advance any named branch. Local `main` first, then
-  # local `master`, and only fall back to `origin/main` as a last resort
-  # with a warning.
+  # Require a LOCAL branch as the base. codex-merge-wave does
+  # `git checkout -q "$BASE"` and commits into it; a remote-tracking ref
+  # like origin/main checks out in detached HEAD and the squash commits
+  # never advance any named branch. In that case switching branches at
+  # the end of the run would orphan every merged commit. Fail loudly
+  # rather than silently lose work.
   if git show-ref --verify --quiet refs/heads/main; then
     BASE="main"
   elif git show-ref --verify --quiet refs/heads/master; then
     BASE="master"
-  elif git show-ref --verify --quiet refs/remotes/origin/main; then
-    echo "WARNING: no local main/master branch; defaulting to origin/main." >&2
-    echo "         codex-merge-wave will commit onto a detached HEAD." >&2
-    echo "         Pass --base <local-branch> to avoid this." >&2
-    BASE="origin/main"
   else
-    echo "ERROR: no local main/master branch and no origin/main remote." >&2
-    echo "       Pass --base <local-branch> explicitly." >&2
+    echo "ERROR: no local main or master branch found." >&2
+    if git show-ref --verify --quiet refs/remotes/origin/main; then
+      echo "       origin/main exists but is a remote ref — checking it out" >&2
+      echo "       would put every merge on a detached HEAD and orphan the" >&2
+      echo "       commits. Create a local tracking branch first:" >&2
+      echo "         git checkout -b main origin/main" >&2
+      echo "       Or pass --base <local-branch> explicitly." >&2
+    else
+      echo "       Pass --base <local-branch> explicitly." >&2
+    fi
     exit 2
   fi
 fi

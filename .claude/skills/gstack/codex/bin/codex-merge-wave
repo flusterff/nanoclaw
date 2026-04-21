@@ -44,7 +44,23 @@ cd "$repo_root"
 
 git checkout -q "$BASE"
 
+STATE_JSON="$WORK/state.json"
 for n in $tasks; do
+  # Skip already-merged tasks on resume. codex-run-wave skips them at the
+  # dispatch stage, but if the earlier run merged a task and then failed
+  # later (e.g. post-wave global test), the task branches have been torn
+  # down. A vanilla git merge --squash <branch> would then fail with
+  # "unknown revision" and the wave could never complete.
+  if [ -r "$STATE_JSON" ]; then
+    task_state="$(jq -r --argjson w "$WAVE" --argjson n "$n" \
+      '.waves[] | select(.wave == $w) | .tasks[] | select(.num == $n) | .status' \
+      "$STATE_JSON" 2>/dev/null || echo "")"
+    if [ "$task_state" = "merged" ]; then
+      echo "[WAVE $WAVE] task $n already merged; skipping" >&2
+      continue
+    fi
+  fi
+
   slug="$(jq -r --argjson n "$n" '.tasks[] | select(.num == $n) | .slug' "$PLAN_JSON")"
   heading="$(jq -r --argjson n "$n" '.tasks[] | select(.num == $n) | .heading' "$PLAN_JSON")"
   branch="codex/$plan_slug/$slug"
