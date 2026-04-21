@@ -188,6 +188,13 @@ if [ -n "$ONLY_TASK" ]; then
     [ -z "$sl" ] && continue
     "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
   done
+  # Single-task plan with --only-task that passed the canary: the whole
+  # plan is done. Mark the wave completed so state isn't permanently
+  # non-terminal. (Multi-task plans with --only-task are intentionally
+  # left in_progress — peer tasks still need to run on later invocations.)
+  if [ "$canary_total_tasks" = "1" ]; then
+    "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
+  fi
 elif [ "$is_final_wave" -eq 1 ]; then
   # Final wave green: tear down every worktree accumulated across the plan.
   all_slugs="$(jq -r '.tasks[].slug' "$PLAN_JSON")"

@@ -185,10 +185,12 @@ process_one() {
         "$BIN/codex-worktree" teardown "$WORK" "$slug" > /dev/null 2>&1 || true
       fi
       rm -f "$sid_file" "$prompt_file" 2>/dev/null || true
+      # Fallback markers are written as needs-claude-fallback.<W>.<N>.json
+      # (no per-attempt suffix), unlike spec-check which DOES have one.
       rm -f "$WORK"/needs-spec-check.$WAVE.$num.*.json \
             "$WORK"/spec-check-result.$WAVE.$num.*.json \
-            "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
-            "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
+            "$WORK"/needs-claude-fallback.$WAVE.$num.json \
+            "$WORK"/claude-fallback-result.$WAVE.$num.json \
             "$WORK"/findings.$WAVE.$num.*.txt \
             "$WORK"/findings.$WAVE.$num.*.txt.review \
             "$WORK"/diff.$WAVE.$num.txt \
@@ -202,13 +204,20 @@ process_one() {
       ;;
   esac
 
-  "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status dispatched
+  # Don't mark `dispatched` here yet when we're about to enter the
+  # fallback-resume branch: that would briefly regress the task's status and,
+  # if the process is interrupted in that window, the next --resume would
+  # treat it as a normal dispatched-task interruption and wipe the subagent's
+  # preserved worktree + markers. For the fallback-resume path, leave the
+  # status as `claude-fallback` (it already is).
+  if [ "$resume_fallback" -ne 1 ]; then
+    "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status dispatched
+  fi
 
   # Resume from claude-fallback: skip the codex retry ladder and consume an
   # existing (or pending) fallback result directly. The in-progress subagent
   # edits live in $wt; the marker files may or may not already exist.
   if [ "$resume_fallback" -eq 1 ]; then
-    "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status claude-fallback
     # If the needs-claude-fallback marker is missing (the prior run had
     # already consumed it and written a result), we're good. If the result
     # is missing too, re-emit the request marker so Claude's poll loop
