@@ -45,12 +45,16 @@ cd "$repo_root"
 git checkout -q "$BASE"
 
 STATE_JSON="$WORK/state.json"
+
+# Track which task slugs we merged this run so we can defer their teardown
+# until AFTER the post-wave global test passes. If the test fails, worktrees
+# and branches stay alive so `codex-implement --resume` can re-run the test
+# (or the user can inspect the per-task worktrees) without having to undo
+# and re-dispatch the whole wave.
+merged_this_run_slugs=""
+
 for n in $tasks; do
-  # Skip already-merged tasks on resume. codex-run-wave skips them at the
-  # dispatch stage, but if the earlier run merged a task and then failed
-  # later (e.g. post-wave global test), the task branches have been torn
-  # down. A vanilla git merge --squash <branch> would then fail with
-  # "unknown revision" and the wave could never complete.
+  # Skip tasks already merged on a previous --resume.
   if [ -r "$STATE_JSON" ]; then
     task_state="$(jq -r --argjson w "$WAVE" --argjson n "$n" \
       '.waves[] | select(.wave == $w) | .tasks[] | select(.num == $n) | .status' \
@@ -83,26 +87,59 @@ Co-Authored-By: Claude (claude-opus-4-6) <noreply@anthropic.com>"
   "$BIN/codex-state" set-task-commit "$WORK" --wave "$WAVE" --task "$n" --sha "$sha"
   "$BIN/codex-state" set-status      "$WORK" --wave "$WAVE" --task "$n" --status merged
 
-  "$BIN/codex-worktree" teardown "$WORK" "$slug" > /dev/null
+  merged_this_run_slugs="$merged_this_run_slugs $slug"
 done
 
-# Run the post-wave global test BEFORE marking the wave completed. Otherwise a
-# failure here would leave state.json at "completed" even though the wave is
-# broken, and codex-implement --resume would skip it on the next run — leaking
-# merged commits that no resumable repair path covers.
-# In --only-task mode we skip both the global test (the partial wave is not
-# expected to satisfy the plan's full-wave invariant) and the wave completion
-# flag (other tasks in this wave still need to run on a later invocation).
+# Run the post-wave global test BEFORE tearing anything down and BEFORE
+# marking the wave completed. Task status is already `merged` (commits are on
+# $BASE), but the wave invariant hasn't been validated yet. If the test
+# fails, leave every branch and worktree from THIS run alive so the user and
+# a subsequent --resume both have recovery options:
+#   * User can inspect $WORK/<slug> worktrees to figure out what broke.
+#   * --resume will re-run the global test against the already-merged commits
+#     without re-dispatching tasks (task status=merged makes run-wave skip
+#     them; codex-merge-wave skips them in its per-task loop above).
+#
+# In --only-task mode we skip both the global test and the wave-completion
+# flag (the partial wave is not expected to satisfy the plan's full-wave
+# invariant, and other tasks still need to run later). Also don't tear down
+# worktrees for the unmerged tasks in that wave.
 if [ -z "$ONLY_TASK" ]; then
   global_test="$(jq -r '.test_command' "$PLAN_JSON")"
   if [ -n "$global_test" ] && [ "$global_test" != "null" ]; then
     if ! bash -c "$global_test"; then
       "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status in_progress
       echo "ESCALATE wave=$WAVE reason=post-wave-global-test-failed" >&2
+      echo "  task worktrees preserved at $WORK/<slug> for inspection." >&2
+      echo "  After fixing the underlying cause, re-run with --resume to" >&2
+      echo "  retry the global test." >&2
       exit 2
     fi
   fi
   "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
+fi
+
+# Global test green (or no global test, or --only-task): safe to tear down
+# the worktrees/branches we merged this run. Also tear down any slugs that
+# were merged on a prior --resume (task status=merged) whose worktree
+# directory still exists — they were deferred because that earlier run hit
+# the failed-test path and never got here.
+if [ -z "$ONLY_TASK" ]; then
+  deferred_slugs="$(jq -r --argjson w "$WAVE" \
+    '.waves[] | select(.wave == $w) | .tasks[] | select(.status == "merged") | .slug' \
+    "$STATE_JSON" 2>/dev/null || true)"
+  for sl in $merged_this_run_slugs $deferred_slugs; do
+    [ -z "$sl" ] && continue
+    if [ -d "$WORK/$sl" ]; then
+      "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
+    fi
+  done
+else
+  # --only-task: tear down only the single task we merged (if any).
+  for sl in $merged_this_run_slugs; do
+    [ -z "$sl" ] && continue
+    "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
+  done
 fi
 
 exit 0

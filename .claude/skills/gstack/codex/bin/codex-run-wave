@@ -139,15 +139,41 @@ process_one() {
   attempt=1
   reasoning="high"
   test_cmd="$(task_meta "$num" | jq -r '.test_command // empty')"
-  [ -z "$test_cmd" ] && test_cmd="$(jq -r '.test_command' "$PLAN_JSON")"
+  # Per-task stage-1 test falls back to a no-op (`true`) when the task has no
+  # Run: line. The plan-level `**Test command:**` is declared as the post-wave
+  # global test and is verified in codex-merge-wave; running it here against
+  # an isolated task worktree would fail on any multi-task plan (a task's
+  # worktree can't contain artifacts from its peers yet).
+  [ -z "$test_cmd" ] && test_cmd="true"
   forbidden="$(cat "$WORK/forbidden.$num" 2>/dev/null || printf '')"
   local findings=""
 
   "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status dispatched
 
-  if [ ! -d "$wt" ]; then
-    "$BIN/codex-worktree" setup "$WORK" "$slug" "$BASE" > /dev/null
+  # `--resume` semantics for an interrupted task (previous status
+  # dispatched|gate-check): wipe partial state and start clean from BASE.
+  # Without this, a crashed run leaves half-edited files, a stale codex
+  # session id, and leftover gate artifacts that would make attempt 1 of
+  # the resumed run look like attempt N (spurious passes or failures).
+  # Terminal-good statuses (passed-gate, merged) are filtered out before
+  # this point; terminal-bad (blocked) never reaches here. So any task
+  # that arrives here with a pre-existing worktree is genuinely interrupted
+  # and should be reset.
+  if [ -d "$wt" ]; then
+    "$BIN/codex-worktree" teardown "$WORK" "$slug" > /dev/null 2>&1 || true
   fi
+  # Clean any leftover per-task scratch files from the prior run.
+  rm -f "$sid_file" "$prompt_file" 2>/dev/null || true
+  rm -f "$WORK"/needs-spec-check.$WAVE.$num.*.json \
+        "$WORK"/spec-check-result.$WAVE.$num.*.json \
+        "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
+        "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
+        "$WORK"/findings.$WAVE.$num.*.txt \
+        "$WORK"/findings.$WAVE.$num.*.txt.review \
+        "$WORK"/diff.$WAVE.$num.txt \
+        2>/dev/null || true
+
+  "$BIN/codex-worktree" setup "$WORK" "$slug" "$BASE" > /dev/null
 
   while :; do
     render_prompt "$num" "$findings" "$forbidden" > "$prompt_file"
