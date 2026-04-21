@@ -65,7 +65,19 @@ render_prompt() {
   body="$(jq -r '.body' <<<"$meta")"
   slug="$(jq -r '.slug' <<<"$meta")"
   test_cmd="$(jq -r '.test_command // empty' <<<"$meta")"
-  [ -z "$test_cmd" ] && test_cmd="$(jq -r '.test_command' "$PLAN_JSON")"
+  # Plan-size-aware fallback (matches process_one's stage-1 logic):
+  # multi-task plans fall back to `true` so we don't tell codex to run the
+  # whole-plan acceptance command inside an isolated task worktree; only
+  # single-task plans fall back to the plan-level test.
+  if [ -z "$test_cmd" ]; then
+    plan_total_tasks="$(jq '.tasks | length' "$PLAN_JSON")"
+    if [ "$plan_total_tasks" = "1" ]; then
+      test_cmd="$(jq -r '.test_command // "true"' "$PLAN_JSON")"
+      [ -z "$test_cmd" ] || [ "$test_cmd" = "null" ] && test_cmd="true"
+    else
+      test_cmd="true"
+    fi
+  fi
   goal="$(jq -r '.goal' "$PLAN_JSON")"
   arch="$(jq -r '.architecture' "$PLAN_JSON")"
 
@@ -234,11 +246,18 @@ process_one() {
         "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status passed-gate
         return 0
       fi
-      # Gate still red → re-queue a fresh fallback request.
+      # Gate still red → re-queue a fresh fallback request. Point Claude
+      # at the NEW findings file codex-gate just wrote (4-resume-regate),
+      # not at the stale attempt-3 findings — the worktree state has
+      # changed and the gate's complaint is different now.
+      regate_findings="$WORK/findings.$WAVE.$num.4-resume-regate.txt"
+      if [ ! -r "$regate_findings" ]; then
+        regate_findings="$WORK/findings.$WAVE.$num.3.txt"
+      fi
       jq -n \
         --argjson w "$WAVE" --argjson t "$num" \
         --arg slug "$slug" --arg wt "$wt" \
-        --arg base "$BASE" --arg findings "$WORK/findings.$WAVE.$num.3.txt" \
+        --arg base "$BASE" --arg findings "$regate_findings" \
         --arg plan_json "$PLAN_JSON" \
         --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{wave:$w, task:$t, slug:$slug, worktree_path:$wt, base:$base,
