@@ -5,7 +5,8 @@
 #   codex-implement <plan-file> [options]
 #
 # Options:
-#   --base <ref>          default origin/main (auto-falls-back to main)
+#   --base <ref>          default: local main/master. Must be a LOCAL branch,
+#                         not a remote-tracking ref like origin/main.
 #   --dry-run             parse-only, print summary, exit 0
 #   --resume              resume from state.json
 #   --rollback            revert every merged commit (see --rollback doc)
@@ -102,6 +103,22 @@ fi
 
 PLAN_JSON="$WORK/plan.json"
 "$BIN/codex-parse-plan" "$PLAN" > "$PLAN_JSON"
+
+# Even when --base was provided explicitly, reject remote-tracking refs.
+# codex-merge-wave checks them out and commits into them, but a remote ref
+# leaves git on detached HEAD and every squash commit becomes an orphan as
+# soon as the user switches branches. Refuse upfront with a helpful error.
+if [ -n "$BASE" ] && git show-ref --verify --quiet "refs/remotes/$BASE"; then
+  if ! git show-ref --verify --quiet "refs/heads/$BASE"; then
+    echo "ERROR: --base $BASE is a remote-tracking ref." >&2
+    echo "       codex-merge-wave would commit onto a detached HEAD and" >&2
+    echo "       orphan every squash commit. Create a local branch first:" >&2
+    _local_name="${BASE#origin/}"
+    echo "         git checkout -b $_local_name $BASE" >&2
+    echo "       Then pass --base $_local_name." >&2
+    exit 2
+  fi
+fi
 
 if [ -z "$BASE" ]; then
   # Require a LOCAL branch as the base. codex-merge-wave does
