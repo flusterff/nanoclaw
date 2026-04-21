@@ -173,6 +173,25 @@ for t in tasks:
 if dup_nums:
     errors.append(f"ERROR: duplicate task numbers: {' '.join(str(n) for n in dup_nums)}")
 
+# Reject duplicate slugs. Slugs are derived from task headings; two tasks
+# with the same heading (e.g. "Task 1: apply fix" in Wave 1 and "Task 7:
+# apply fix" in Wave 3) would both resolve to the same slug and therefore
+# the same worktree directory + branch name. With deferred teardown across
+# waves, the second wave's codex-worktree setup would fail with
+# "already exists".
+seen_slugs = {}
+dup_slugs = set()
+for t in tasks:
+    if t['slug'] in seen_slugs:
+        dup_slugs.add(t['slug'])
+    else:
+        seen_slugs[t['slug']] = t['num']
+if dup_slugs:
+    errors.append(
+        "ERROR: duplicate task slugs (derived from headings). Rename a task "
+        f"so slugs are unique across the plan: {' '.join(sorted(dup_slugs))}"
+    )
+
 # overlapping files within a wave
 task_map = {t['num']: t for t in tasks}
 for w in waves:
