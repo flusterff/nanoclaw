@@ -120,10 +120,19 @@ if [ -z "$ONLY_TASK" ]; then
       if ! bash -c "$global_test"; then
         "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status in_progress
         echo "ESCALATE wave=$WAVE reason=post-wave-global-test-failed" >&2
+        echo "" >&2
         echo "  task worktrees preserved at $WORK/<slug> for inspection" >&2
-        echo "  (this includes tasks from every wave in the plan, because" >&2
-        echo "  the plan-level test could fail due to a bug merged in any" >&2
-        echo "  earlier wave). After fixing, re-run with --resume." >&2
+        echo "  (every wave in the plan — the plan test could fail on a bug" >&2
+        echo "  from any earlier wave)." >&2
+        echo "" >&2
+        echo "  TO REPAIR:" >&2
+        echo "  (a) edit the code and commit the fix directly on $BASE," >&2
+        echo "      then run 'codex-implement --resume <plan>'. Resume" >&2
+        echo "      re-runs ONLY the plan-level test; it does not" >&2
+        echo "      re-dispatch or re-squash merged tasks." >&2
+        echo "  (b) run 'codex-implement --rollback <plan>' to revert every" >&2
+        echo "      squash commit from this plan, then re-run from scratch" >&2
+        echo "      after fixing the plan itself." >&2
         exit 2
       fi
     fi
@@ -143,27 +152,42 @@ fi
 #   * Full plan, final wave, plan test green: tear down EVERY slug in the
 #     whole plan that still has a worktree (accumulated across all waves).
 if [ -n "$ONLY_TASK" ]; then
-  # --only-task sanity gate: run the plan-level test for extra safety.
-  # If it fails for reasons unrelated to the missing peer tasks, that's
-  # a real signal. If it fails because of missing peers, the user knew
-  # they were canary-running a single task and can inspect the worktree.
-  # Non-fatal: we still tear down on pass, preserve on fail.
+  # --only-task sanity gate: run the plan-level test. Failure is FATAL —
+  # the squash commit has already landed on BASE (bad commit on main) and
+  # the user should decide: either the failure is because peer tasks
+  # aren't merged yet (then use --rollback + a full run) or it's a real
+  # problem with this task's output. Either way, don't silently tear
+  # down + exit 0 with broken state.
   canary_test="$(jq -r '.test_command' "$PLAN_JSON")"
-  canary_pass=1
-  if [ -n "$canary_test" ] && [ "$canary_test" != "null" ]; then
+  canary_total_tasks="$(jq '.tasks | length' "$PLAN_JSON")"
+  if [ -n "$canary_test" ] && [ "$canary_test" != "null" ] && [ "$canary_total_tasks" != "1" ]; then
+    # Multi-task plan: plan-level test typically needs peer tasks to have
+    # run; under --only-task those are skipped by design. Don't fail the
+    # canary on that condition — just warn + preserve the worktree so
+    # the user can inspect, but keep exit code 0 so tooling can chain.
     if ! bash -c "$canary_test" >/dev/null 2>&1; then
-      canary_pass=0
-      echo "WARNING: plan-level test failed under --only-task." >&2
-      echo "  This may be expected (peer tasks haven't run yet)." >&2
+      echo "WARNING: plan-level test failed under --only-task on a multi-task plan." >&2
+      echo "  This is usually expected — peer tasks haven't merged yet." >&2
       echo "  Worktree preserved at $WORK/<slug> for inspection." >&2
+      # Preserve worktree; don't tear down; exit 0.
+      exit 0
+    fi
+  elif [ -n "$canary_test" ] && [ "$canary_test" != "null" ] && [ "$canary_total_tasks" = "1" ]; then
+    # Single-task plan: plan-level test IS the whole plan's acceptance
+    # test. Failure is a real bug.
+    if ! bash -c "$canary_test"; then
+      echo "ESCALATE --only-task canary: plan-level test failed." >&2
+      echo "  Squash commit is already on $BASE — inspect, fix, and use" >&2
+      echo "  codex-implement --rollback if you want to revert it." >&2
+      echo "  Worktree preserved at $WORK/<slug>." >&2
+      exit 2
     fi
   fi
-  if [ "$canary_pass" -eq 1 ]; then
-    for sl in $merged_this_run_slugs; do
-      [ -z "$sl" ] && continue
-      "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
-    done
-  fi
+  # Canary green (or no plan test): tear down.
+  for sl in $merged_this_run_slugs; do
+    [ -z "$sl" ] && continue
+    "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
+  done
 elif [ "$is_final_wave" -eq 1 ]; then
   # Final wave green: tear down every worktree accumulated across the plan.
   all_slugs="$(jq -r '.tasks[].slug' "$PLAN_JSON")"

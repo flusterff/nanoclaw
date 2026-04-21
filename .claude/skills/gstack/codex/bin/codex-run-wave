@@ -139,12 +139,22 @@ process_one() {
   attempt=1
   reasoning="high"
   test_cmd="$(task_meta "$num" | jq -r '.test_command // empty')"
-  # Per-task stage-1 test falls back to a no-op (`true`) when the task has no
-  # Run: line. The plan-level `**Test command:**` is declared as the post-wave
-  # global test and is verified in codex-merge-wave; running it here against
-  # an isolated task worktree would fail on any multi-task plan (a task's
-  # worktree can't contain artifacts from its peers yet).
-  [ -z "$test_cmd" ] && test_cmd="true"
+  # Per-task stage-1 test fallback:
+  # * Multi-task plans: fall back to `true` (no-op). The plan-level test is a
+  #   whole-plan acceptance test that typically can't hold in an isolated task
+  #   worktree (a task can't see its peers' artifacts yet).
+  # * Single-task plans: fall back to the plan-level test. There's no peer
+  #   scope to worry about, and bypassing the check here would let a broken
+  #   commit land on BASE before the plan test fired.
+  if [ -z "$test_cmd" ]; then
+    plan_total_tasks="$(jq '.tasks | length' "$PLAN_JSON")"
+    if [ "$plan_total_tasks" = "1" ]; then
+      test_cmd="$(jq -r '.test_command // "true"' "$PLAN_JSON")"
+      [ -z "$test_cmd" ] || [ "$test_cmd" = "null" ] && test_cmd="true"
+    else
+      test_cmd="true"
+    fi
+  fi
   forbidden="$(cat "$WORK/forbidden.$num" 2>/dev/null || printf '')"
   local findings=""
 
