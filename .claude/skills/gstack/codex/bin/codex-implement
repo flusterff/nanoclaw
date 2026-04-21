@@ -102,21 +102,19 @@ else
 fi
 
 PLAN_JSON="$WORK/plan.json"
-# Rollback and resume should both work even if the plan now fails to parse
-# (e.g. the user edited the plan into a duplicate slug while trying to fix a
-# failure). Rollback uses state.json; resume uses the cached plan.json from
-# the original run. Skip re-parsing in those cases and reuse whatever
-# plan.json the original run wrote.
+# Rollback and resume should both use the cached plan.json from the original
+# run, NOT reparse the current plan file. Reparse-and-overwrite has three
+# hazards during recovery:
+#   1. Parse errors introduced by the user's edits block recovery entirely.
+#   2. Valid edits that rename task headings produce new slugs, but
+#      state.json + the existing branches/worktrees are still keyed to the
+#      original slugs, so codex-merge-wave looks up the wrong branch.
+#   3. Changes to wave membership mutate the execution plan mid-recovery.
+# The cached plan.json captures the plan AS the original run saw it, which
+# is what state.json references. To pick up plan edits, the user must
+# --rollback and re-run (fresh init repopulates plan.json from scratch).
 if { [ "$ROLLBACK" -eq 1 ] || [ "$RESUME" -eq 1 ]; } && [ -r "$PLAN_JSON" ]; then
-  # Best-effort: try to re-parse; if it fails, keep the cached plan.json.
-  # This lets editors of the plan fix parse errors by --resume; if the
-  # new plan is valid, we pick up their edits. If it's invalid, we still
-  # proceed with the recorded state.
-  if ! "$BIN/codex-parse-plan" "$PLAN" > "$PLAN_JSON.new" 2>/dev/null; then
-    rm -f "$PLAN_JSON.new" 2>/dev/null || true
-  else
-    mv "$PLAN_JSON.new" "$PLAN_JSON"
-  fi
+  : # use cached plan.json as-is
 else
   "$BIN/codex-parse-plan" "$PLAN" > "$PLAN_JSON"
 fi
