@@ -307,7 +307,37 @@ if [ -n "$ONLY_TASK" ]; then
         echo "  Worktree preserved at $WORK/<slug>." >&2
         exit 2
       fi
-      # Pre-canary also failed with the SAME output → peer-missing, expected.
+      # Pre-canary also failed with the SAME output. Normally this is the
+      # peer-missing case. BUT if this canary just merged the LAST
+      # remaining task in the plan, there ARE no missing peers — a
+      # failing plan test is a real bug regardless of pre/post similarity.
+      plan_complete_now=1
+      for tn in $(jq -r '.tasks[].num' "$PLAN_JSON"); do
+        tstat="$(jq -r --argjson n "$tn" \
+          '.waves[].tasks[] | select(.num == $n) | .status' \
+          "$STATE_JSON" 2>/dev/null || echo "")"
+        [ "$tstat" = "merged" ] || { plan_complete_now=0; break; }
+      done
+      if [ "$plan_complete_now" -eq 1 ]; then
+        echo "ESCALATE --only-task canary completed the plan but the plan-level" >&2
+        echo "  test is still failing. No unmerged peers left — this is a real" >&2
+        echo "  plan failure. Undoing the squash commit…" >&2
+        if ! git reset --hard "$pre_canary_sha" > /dev/null 2>&1; then
+          echo "  ERROR: failed to reset $BASE to $pre_canary_sha." >&2
+          echo "  Bad commit may still be on $BASE — inspect manually and" >&2
+          echo "  use codex-implement --rollback to revert." >&2
+          "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --status escalated
+          rm -f "$post_output_file" "$pre_output_file" 2>/dev/null || true
+          exit 2
+        fi
+        "$BIN/codex-state" set-task-commit "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --sha ""
+        "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$ONLY_TASK" --status escalated
+        echo "  Worktree preserved at $WORK/<slug>." >&2
+        echo "  Fix the plan (task specs / plan-level Test command:) and" >&2
+        echo "  re-run. --rollback is already clean." >&2
+        rm -f "$post_output_file" "$pre_output_file" 2>/dev/null || true
+        exit 2
+      fi
       echo "WARNING: plan-level test failed under --only-task on a multi-task plan," >&2
       echo "  but was also failing on BASE before this canary merged with" >&2
       echo "  substantively identical output." >&2
