@@ -299,18 +299,29 @@ process_one() {
       done
     fi
 
-    if [ -z "$fb_marker" ] && [ -z "$fb_result" ]; then
+    # If no marker AND no result survived, or if a marker survived with no
+    # matching result (the prior worker may have been interrupted after
+    # consuming its own reply but before removing its marker), always try
+    # a fresh gate first against the subagent's existing edits — in both
+    # cases the worktree may already be good enough to PASS. Only emit a
+    # NEW fallback request if the gate still fails.
+    if [ -z "$fb_result" ]; then
       GATE_ATTEMPT="4-resume-regate" \
       gate_status="$("$BIN/codex-gate" \
         --worktree "$wt" --work-dir "$WORK" \
         --wave "$WAVE" --task "$num" --task-slug "$slug" \
         --base "$BASE" --test-cmd "$test_cmd" 2>/dev/null || echo FAIL)"
       if [ "$gate_status" = "PASS" ]; then
+        # Clean any leftover stale marker before returning so a later
+        # attempt doesn't see it as active.
+        [ -n "$fb_marker" ] && rm -f "$fb_marker" 2>/dev/null || true
         "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status passed-gate
         return 0
       fi
-      # Gate still red → emit a fresh fallback request with a new generation
-      # so stale replies from prior runs can't clobber it.
+      # Gate still red → emit a fresh fallback request with a new
+      # generation. Delete any stale marker first so a delayed reply to
+      # IT can't satisfy the new request's wait loop.
+      [ -n "$fb_marker" ] && rm -f "$fb_marker" 2>/dev/null || true
       regate_findings="$WORK/findings.$WAVE.$num.4-resume-regate.txt"
       if [ ! -r "$regate_findings" ]; then
         regate_findings="$WORK/findings.$WAVE.$num.3.txt"
@@ -328,10 +339,6 @@ process_one() {
           findings_file:$findings, plan_json:$plan_json, requested_at:$now,
           resumed:true}' \
         > "$fb_marker"
-    fi
-    # If a marker exists but no reply yet, derive the expected reply path.
-    if [ -z "$fb_result" ] && [ -n "$fb_marker" ]; then
-      fb_result="$(echo "$fb_marker" | sed 's/needs-claude-fallback/claude-fallback-result/')"
     fi
     local waited=0
     while [ ! -r "$fb_result" ]; do

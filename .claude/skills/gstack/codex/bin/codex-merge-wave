@@ -197,6 +197,9 @@ if [ -n "$ONLY_TASK" ]; then
   # down + exit 0 with broken state.
   canary_test="$(jq -r '.test_command' "$PLAN_JSON")"
   canary_total_tasks="$(jq '.tasks | length' "$PLAN_JSON")"
+  # Track whether the plan-level test already passed here so the completion
+  # branch below doesn't re-run a potentially non-idempotent command.
+  canary_plan_test_passed=0
   if [ -n "$canary_test" ] && [ "$canary_test" != "null" ] && [ "$canary_total_tasks" != "1" ]; then
     # Multi-task plan: a failing plan-level test is only acceptable if
     # it's because peer tasks haven't merged yet. Check whether EVERY
@@ -232,6 +235,8 @@ if [ -n "$ONLY_TASK" ]; then
       echo "  Worktree preserved at $WORK/<slug> for inspection." >&2
       # Preserve worktree; don't tear down; exit 0.
       exit 0
+    else
+      canary_plan_test_passed=1
     fi
   elif [ -n "$canary_test" ] && [ "$canary_test" != "null" ] && [ "$canary_total_tasks" = "1" ]; then
     # Single-task plan: plan-level test IS the whole plan's acceptance
@@ -243,6 +248,7 @@ if [ -n "$ONLY_TASK" ]; then
       echo "  Worktree preserved at $WORK/<slug>." >&2
       exit 2
     fi
+    canary_plan_test_passed=1
   fi
   # Canary green (or no plan test): tear down.
   for sl in $merged_this_run_slugs; do
@@ -279,7 +285,11 @@ if [ -n "$ONLY_TASK" ]; then
       if [ "$plan_all_merged" -eq 1 ]; then
         plan_test="$(jq -r '.test_command' "$PLAN_JSON")"
         plan_test_ok=1
-        if [ -n "$plan_test" ] && [ "$plan_test" != "null" ]; then
+        # If the canary above already ran the plan test and passed, don't
+        # run it a second time — non-idempotent tests (e.g. one that creates
+        # a sentinel file on first run) would pass once then fail here.
+        if [ -n "$plan_test" ] && [ "$plan_test" != "null" ] && \
+           [ "$canary_plan_test_passed" -ne 1 ]; then
           if ! bash -c "$plan_test" >/dev/null 2>&1; then plan_test_ok=0; fi
         fi
         if [ "$plan_test_ok" -eq 1 ]; then
