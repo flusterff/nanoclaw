@@ -1,93 +1,107 @@
-# /codex implement — Known Follow-Up Issues
+# /codex implement — Follow-Up Log
 
-These are real bugs caught by 6 rounds of `codex review` merge gates that
-are **not blocking the happy path** but should be fixed in a follow-up
-pass. The happy-path validation ran clean (3 tasks across 2 waves with
-real `codex exec`, 0 gate failures, all commits landed on the base
-branch).
+**Status as of 2026-04-22:** All known P1 and P2 issues fixed through
+39 rounds of codex review (rounds 7-44). Round 45 returned clean — no
+discrete actionable bugs. Happy path validated; 18/18 integration
+tests pass; parse-plan rejects invalid configurations with clear
+errors.
 
-Every issue below has been independently confirmed by codex review and
-is a narrow edge case. Budget for the initial land was 3 fix-rounds;
-this list is what's left after 5.
+Skill is considered production-grade. This file tracks open and
+previously-addressed issues for reference.
 
-## Recovery / resume edge cases
+## Open items
 
-### 1. Post-wave global test failure leaves no resumable repair path (P1)
+(none known)
 
-**Where:** `bin/codex-merge-wave`, around line 83 (the merged-task cleanup).
+## Historical: items addressed during 45-round hardening pass
 
-**Problem:** each task is marked `merged` and its worktree is torn down
-*before* the post-wave global test runs. If the global test fails, both
-`codex-run-wave` and `codex-merge-wave` skip `merged` tasks on
-`--resume`, so the bad commits stay on the base branch with no remaining
-branch/worktree for the user or orchestrator to edit. The only recovery
-path is `--rollback` plus a manual re-author.
+### Core orchestrator
+- [FIXED] Defer task-branch/worktree teardown until post-wave global
+  test passes (so `--resume` after a failure can re-run only the
+  plan test).
+- [FIXED] `--resume` force-cleans interrupted task worktrees (wipe
+  partial state + recreate from BASE for `dispatched`/`gate-check`
+  tasks); preserves `claude-fallback` state.
+- [FIXED] Plan-level `**Test command:**` runs only after the final
+  declared wave, not after every wave.
+- [FIXED] `--resume` and `--rollback` use cached `plan.json` from
+  the original run (never re-parse the current plan).
+- [FIXED] Global test runs in a disposable worktree so side-effecting
+  tests don't dirty the main checkout.
 
-**Proposed fix:** defer `codex-worktree teardown` and the `merged`
-status write until after the post-wave test passes. Until then keep the
-branch reference so `--resume` can run one more attempt against a
-richer worktree.
+### Parse-plan
+- [FIXED] Work-dir slug collisions across repos/paths (namespaced by
+  `<repo-id>--<plan-base>--<sha1[0:8]>`).
+- [FIXED] Duplicate task numbers / duplicate slugs explicitly
+  rejected with actionable errors.
+- [FIXED] Fenced code blocks (```...```) don't count as task headings.
+- [FIXED] Task body preserves fenced examples for the implementer
+  prompt while metadata extraction (Run:, file claims) scans a
+  fence-stripped view.
+- [FIXED] Multi-task plans must declare per-task `Run:` lines (the
+  plan-level test cannot substitute because it typically needs peer
+  artifacts).
 
-### 2. `--resume` reuses partial task worktrees mid-gate (P2)
+### --only-task canary
+- [FIXED] Canary wave validation: reject if earlier waves still have
+  unmerged peers.
+- [FIXED] Canary plan-test probe uses disposable worktrees for both
+  post-canary and pre-canary state.
+- [FIXED] Canary that introduces a regression (plan test passes on
+  BASE, fails after canary merge) auto-reverts via `git reset --hard`
+  and clears `final_commit_on_base`.
+- [FIXED] Canary that completes the plan (all tasks now merged) but
+  leaves plan test red escalates instead of silently exiting 0.
+- [FIXED] Summary output distinguishes full completion from canary
+  partial completion.
+- [FIXED] Rejection preflight cleans up the just-initialized
+  `state.json` so the next non-resume run isn't blocked.
 
-**Where:** `bin/codex-run-wave` `process_one` worktree-setup block
-(around line 148).
+### Claude fallback protocol
+- [FIXED] Request markers include a `<pid>-<epoch>` generation suffix
+  so delayed replies from prior runs don't clobber current attempts.
+- [FIXED] Resume-from-`claude-fallback` preserves the subagent's
+  in-progress worktree + markers; skips the codex retry ladder.
+- [FIXED] Stale marker → wait for in-flight worker reply (full 30-min
+  budget) before re-gating or emitting a fresh request.
+- [FIXED] Attempt-4 and resume paths both remove the request marker
+  alongside the result so a later poll doesn't re-trigger fallback.
+- [FIXED] Marker discovery uses python3 glob + mtime sort
+  (cross-platform; safe on paths with spaces; empty-safe).
+- [FIXED] Rollback uses slugs from `state.json`, not the current
+  plan.json (handles plans edited between original run and rollback).
+- [FIXED] Rollback runs `git worktree prune` before `branch -D` so
+  deleted-out-of-band worktrees don't leave orphan branches.
 
-**Problem:** `--resume` restarts `dispatched`/`gate-check` tasks from
-attempt 1, but worktree setup only runs when the directory is missing.
-A previous run that died mid-edit or mid-gate leaves partial files,
-stale session state, and leftover gate artifacts, so the "fresh"
-attempt-1 rerun is anything but.
+### Misc correctness
+- [FIXED] `awk` gsub `&` in replacement string: prompts containing
+  `&&` (e.g. shell pipelines in Run:) now render correctly.
+- [FIXED] codex sandbox can't commit from inside its workspace: bash
+  auto-commits task worktree changes after codex returns DONE /
+  DONE_WITH_CONCERNS.
+- [FIXED] `codex review` CLI change in codex-cli 0.122: dropped
+  positional prompt (conflicts with `--base`).
+- [FIXED] Spec-check markers carry `plan_goal` / `plan_architecture` /
+  `task_body` per PROTOCOL.md.
+- [FIXED] Spec-check markers versioned per attempt; timeout cleans
+  up stale markers.
+- [FIXED] Reject remote-tracking `--base` refs (detached-HEAD
+  orphaning guard); require local branch.
+- [FIXED] PID-file fallback lock for systems without flock (macOS).
+- [FIXED] Iterate declared wave numbers (not `seq 1..length`) to
+  handle non-contiguous labels.
+- [FIXED] `plan-test-passed` sentinel survives across invocations so
+  non-idempotent plan tests aren't re-executed on --resume.
 
-**Proposed fix:** on `--resume`, force-teardown a non-terminal task's
-worktree before recreating it. Wipe stale `sid.*`, `findings.*`, and
-`needs-*`/`result-*` markers for that task first.
+## Test coverage
 
-## Plan-semantics edge cases
-
-### 3. Plan-level `**Test command:**` used as per-task gate (P2)
-
-**Where:** `bin/codex-run-wave` around line 141.
-
-**Problem:** the design treats `**Test command:**` as the *post-wave*
-global test. But `codex-run-wave` falls back to it for any task that
-lacks its own `Run:` line, so stage 1 runs the full integration suite
-against each isolated task worktree. In a multi-task plan, otherwise-
-valid tasks fail until the rest of the wave is merged.
-
-**Proposed fix:** when a task has no `Run:` line, either skip stage 1
-tests or fall back to a no-op (`true`). Keep the plan-level test as
-post-wave only.
-
-## Hygiene items found along the way
-
-- SKILL.md still advertises `origin/main` as the default for `--base`;
-  the help-text section of the skill should be regenerated to reflect
-  the new "local branch required" behavior.
-- `package-lock.json` on the feat branch is inconsistent with
-  `package.json` (caught by round-1 review). Regenerate with
-  `npm install` before shipping to main if npm CI steps are added.
-- `src/channels/telegram.ts:223-236` never rejects `connect()` if
-  `bot.start()` fails. Orthogonal to /codex implement; separate PR.
-
-## What has been fixed in this landing
-
-- awk gsub `&` corruption in prompt rendering
-- codex sandbox can't commit in worktree metadata → bash auto-commits
-- `codex review` CLI API change (prompt + `--base` mutually exclusive)
-- Spec-check marker enrichment (goal/architecture/task_body per protocol)
-- Default base: local `main`/`master` required, no detached-HEAD fallback
-- Remote-tracking `--base` refs rejected with clear error message
-- Work-dir slug collisions (namespace by repo + plan path hash)
-- `--rollback` honors the recorded base_ref from state.json
-- `codex-merge-wave` sets `completed` only after the global test passes
-- `--resume` skips already-merged tasks in both run-wave and merge-wave
-- `codex review` execution errors converted to gate FAIL (not shell trap)
-- `--only-task` wired through run/merge/wave-skip
-- Stage-3 marker files versioned per attempt
-- Stage-3 timeout cleans up stale markers
-- PID-file lock fallback for systems without `flock` (macOS)
-- Plan parser: fenced code blocks don't count as task headings
-- Plan parser: duplicate task numbers now raise an error
-- Main loop: iterate declared waves (not `seq 1..length`) for
-  non-contiguous wave labels
+18 integration tests cover every path above:
+- `test-render-prompt-ampersand.sh` — awk gsub & regression
+- `test-post-wave-recovery.sh` — global test fail → preserve → resume
+- `test-resume-cleanup.sh` — dirty worktree on resume, force-clean
+- `test-resume-claude-fallback.sh` — preserve subagent work on resume
+- `test-only-task.sh` — canary mode runs only target task
+- `test-claude-fallback.sh` — full fallback-marker protocol
+- `test-cross-wave.sh` — Wave 2 reads Wave 1 artifact
+- plus 11 existing tests (parse, state, worktree, dispatch, gate,
+  merge-wave, rollback, e2e, preflight).
