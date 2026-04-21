@@ -57,6 +57,16 @@ task_meta() {  # $1 = task num; emits json
   jq --argjson n "$1" '.tasks[] | select(.num == $n)' "$PLAN_JSON"
 }
 
+# Fallback marker filenames include a generation suffix (pid + epoch)
+# so a delayed reply from a prior --force-clean'd run's fallback worker
+# cannot be consumed by a restarted attempt. The suffix is written into
+# both the request (needs-claude-fallback.<W>.<N>.<gen>.json) and the
+# matching reply (claude-fallback-result.<W>.<N>.<gen>.json). Workers
+# that poll for needs-claude-fallback.*.json and substitute
+# 'needs-claude-fallback' → 'claude-fallback-result' will still produce
+# the correct reply path.
+fb_gen_new() { echo "$$-$(date +%s)"; }
+
 render_prompt() {
   local num="$1" findings="${2:-}" forbidden="$3"
   local meta heading body test_cmd slug goal arch prior_section=""
@@ -199,10 +209,14 @@ process_one() {
         # Do NOT touch worktree or fallback marker files.
       else
         rm -f "$sid_file" "$prompt_file" 2>/dev/null || true
+        # Clean both the legacy unversioned paths and any generation-suffixed
+        # ones so stale fallback replies can't leak into a fresh attempt.
         rm -f "$WORK"/needs-spec-check.$WAVE.$num.*.json \
               "$WORK"/spec-check-result.$WAVE.$num.*.json \
               "$WORK"/needs-claude-fallback.$WAVE.$num.json \
+              "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
               "$WORK"/claude-fallback-result.$WAVE.$num.json \
+              "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
               "$WORK"/findings.$WAVE.$num.*.txt \
               "$WORK"/findings.$WAVE.$num.*.txt.review \
               "$WORK"/diff.$WAVE.$num.txt \
@@ -215,12 +229,16 @@ process_one() {
         "$BIN/codex-worktree" teardown "$WORK" "$slug" > /dev/null 2>&1 || true
       fi
       rm -f "$sid_file" "$prompt_file" 2>/dev/null || true
-      # Fallback markers are written as needs-claude-fallback.<W>.<N>.json
-      # (no per-attempt suffix), unlike spec-check which DOES have one.
+      # Fallback markers use either the legacy unversioned path
+      # (needs-claude-fallback.<W>.<N>.json) or the new generation-suffixed
+      # path (needs-claude-fallback.<W>.<N>.<gen>.json). Spec-check markers
+      # already use per-attempt suffixing. Clean every variant.
       rm -f "$WORK"/needs-spec-check.$WAVE.$num.*.json \
             "$WORK"/spec-check-result.$WAVE.$num.*.json \
             "$WORK"/needs-claude-fallback.$WAVE.$num.json \
+            "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
             "$WORK"/claude-fallback-result.$WAVE.$num.json \
+            "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
             "$WORK"/findings.$WAVE.$num.*.txt \
             "$WORK"/findings.$WAVE.$num.*.txt.review \
             "$WORK"/diff.$WAVE.$num.txt \
@@ -248,13 +266,25 @@ process_one() {
   # existing (or pending) fallback result directly. The in-progress subagent
   # edits live in $wt; the marker files may or may not already exist.
   if [ "$resume_fallback" -eq 1 ]; then
-    # Try to re-gate the existing worktree first. If the prior run was
-    # interrupted right after removing claude-fallback-result but before
-    # codex-gate updated the task status, the subagent's edits are
-    # already in $wt and a fresh gate pass is all we need — no point
-    # re-queueing a fallback request.
-    if [ ! -r "$WORK/claude-fallback-result.$WAVE.$num.json" ] && \
-       [ ! -r "$WORK/needs-claude-fallback.$WAVE.$num.json" ]; then
+    # If the prior run still has a live, unconsumed fallback marker, consume it
+    # in place (worker may have already replied). Otherwise try a fresh gate —
+    # the prior run may have been interrupted right after consuming its reply
+    # but before codex-gate updated task status, in which case the subagent's
+    # edits are already in $wt and a gate pass is all we need.
+    local fb_gen fb_marker fb_result
+    fb_marker=""
+    fb_result=""
+    for f in "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
+             "$WORK"/needs-claude-fallback.$WAVE.$num.json; do
+      [ -r "$f" ] && fb_marker="$f" && break
+    done
+    # Match any existing reply (either path layout).
+    for f in "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
+             "$WORK"/claude-fallback-result.$WAVE.$num.json; do
+      [ -r "$f" ] && fb_result="$f" && break
+    done
+
+    if [ -z "$fb_marker" ] && [ -z "$fb_result" ]; then
       GATE_ATTEMPT="4-resume-regate" \
       gate_status="$("$BIN/codex-gate" \
         --worktree "$wt" --work-dir "$WORK" \
@@ -264,14 +294,15 @@ process_one() {
         "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status passed-gate
         return 0
       fi
-      # Gate still red → re-queue a fresh fallback request. Point Claude
-      # at the NEW findings file codex-gate just wrote (4-resume-regate),
-      # not at the stale attempt-3 findings — the worktree state has
-      # changed and the gate's complaint is different now.
+      # Gate still red → emit a fresh fallback request with a new generation
+      # so stale replies from prior runs can't clobber it.
       regate_findings="$WORK/findings.$WAVE.$num.4-resume-regate.txt"
       if [ ! -r "$regate_findings" ]; then
         regate_findings="$WORK/findings.$WAVE.$num.3.txt"
       fi
+      fb_gen="$(fb_gen_new)"
+      fb_marker="$WORK/needs-claude-fallback.$WAVE.$num.$fb_gen.json"
+      fb_result="$WORK/claude-fallback-result.$WAVE.$num.$fb_gen.json"
       jq -n \
         --argjson w "$WAVE" --argjson t "$num" \
         --arg slug "$slug" --arg wt "$wt" \
@@ -281,10 +312,14 @@ process_one() {
         '{wave:$w, task:$t, slug:$slug, worktree_path:$wt, base:$base,
           findings_file:$findings, plan_json:$plan_json, requested_at:$now,
           resumed:true}' \
-        > "$WORK/needs-claude-fallback.$WAVE.$num.json"
+        > "$fb_marker"
+    fi
+    # If a marker exists but no reply yet, derive the expected reply path.
+    if [ -z "$fb_result" ] && [ -n "$fb_marker" ]; then
+      fb_result="$(echo "$fb_marker" | sed 's/needs-claude-fallback/claude-fallback-result/')"
     fi
     local waited=0
-    while [ ! -r "$WORK/claude-fallback-result.$WAVE.$num.json" ]; do
+    while [ ! -r "$fb_result" ]; do
       sleep 5; waited=$((waited + 5))
       if [ "$waited" -gt 1800 ]; then
         "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status escalated
@@ -292,8 +327,8 @@ process_one() {
       fi
     done
     local res
-    res="$(jq -r '.status' "$WORK/claude-fallback-result.$WAVE.$num.json")"
-    rm -f "$WORK/claude-fallback-result.$WAVE.$num.json"
+    res="$(jq -r '.status' "$fb_result")"
+    rm -f "$fb_result"
     if [ "$res" = "DONE" ] || [ "$res" = "DONE_WITH_CONCERNS" ]; then
       GATE_ATTEMPT="4-resume" \
       gate_status="$("$BIN/codex-gate" \
@@ -352,6 +387,12 @@ process_one() {
       3) reasoning="xhigh" ;;
       4)
         "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status claude-fallback
+        # Generation suffix keeps a stale reply from a previous --force-clean
+        # or crashed run from being consumed by this attempt.
+        local fb_gen4 fb_marker4 fb_result4
+        fb_gen4="$(fb_gen_new)"
+        fb_marker4="$WORK/needs-claude-fallback.$WAVE.$num.$fb_gen4.json"
+        fb_result4="$WORK/claude-fallback-result.$WAVE.$num.$fb_gen4.json"
         jq -n \
           --argjson w "$WAVE" --argjson t "$num" \
           --arg slug "$slug" --arg wt "$wt" \
@@ -360,9 +401,9 @@ process_one() {
           --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           '{wave:$w, task:$t, slug:$slug, worktree_path:$wt, base:$base,
             findings_file:$findings, plan_json:$plan_json, requested_at:$now}' \
-          > "$WORK/needs-claude-fallback.$WAVE.$num.json"
+          > "$fb_marker4"
         local waited=0
-        while [ ! -r "$WORK/claude-fallback-result.$WAVE.$num.json" ]; do
+        while [ ! -r "$fb_result4" ]; do
           sleep 5; waited=$((waited + 5))
           if [ "$waited" -gt 1800 ]; then
             "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status escalated
@@ -370,8 +411,8 @@ process_one() {
           fi
         done
         local res
-        res="$(jq -r '.status' "$WORK/claude-fallback-result.$WAVE.$num.json")"
-        rm -f "$WORK/claude-fallback-result.$WAVE.$num.json"
+        res="$(jq -r '.status' "$fb_result4")"
+        rm -f "$fb_result4"
         if [ "$res" = "DONE" ] || [ "$res" = "DONE_WITH_CONCERNS" ]; then
           GATE_ATTEMPT="$attempt" \
           gate_status="$("$BIN/codex-gate" \

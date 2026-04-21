@@ -39,11 +39,15 @@ a Task() subagent, writes the result to:
 
 Then Claude deletes the `needs-spec-check.*.json` file.
 
-**`needs-claude-fallback.<wave>.<task-num>.json`** — bash writes when attempts
-1-3 fail. Claude reads, dispatches a Claude Task() subagent using
-`codex-fallback-prompt.md`, waits for completion, writes:
+**`needs-claude-fallback.<wave>.<task-num>.<gen>.json`** — bash writes when
+attempts 1-3 fail. `<gen>` is a per-request generation suffix
+(`<pid>-<epoch>`) that keeps a stale reply from a previous run from being
+consumed by a restarted attempt. Claude reads, dispatches a Claude Task()
+subagent using `codex-fallback-prompt.md`, waits for completion, writes:
 
-**`claude-fallback-result.<wave>.<task-num>.json`**:
+**`claude-fallback-result.<wave>.<task-num>.<gen>.json`** (use the same
+`<gen>` suffix as the matching request marker — the standard substitution
+`needs-claude-fallback` → `claude-fallback-result` preserves it):
 
 ```json
 {
