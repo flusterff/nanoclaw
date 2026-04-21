@@ -266,23 +266,38 @@ process_one() {
   # existing (or pending) fallback result directly. The in-progress subagent
   # edits live in $wt; the marker files may or may not already exist.
   if [ "$resume_fallback" -eq 1 ]; then
-    # If the prior run still has a live, unconsumed fallback marker, consume it
-    # in place (worker may have already replied). Otherwise try a fresh gate —
-    # the prior run may have been interrupted right after consuming its reply
-    # but before codex-gate updated task status, in which case the subagent's
-    # edits are already in $wt and a gate pass is all we need.
+    # If the prior run still has a live, unconsumed fallback marker, consume
+    # it in place (worker may have already replied). Otherwise try a fresh
+    # gate — the prior run may have been interrupted right after consuming
+    # its reply but before codex-gate updated task status, in which case the
+    # subagent's edits are already in $wt and a gate pass is all we need.
+    #
+    # Pair marker ↔ result by generation: pick the newest available marker,
+    # then derive its matching result path via the standard substitution. A
+    # stale reply from an older generation is ignored (wrong path).
     local fb_gen fb_marker fb_result
     fb_marker=""
     fb_result=""
-    for f in "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
-             "$WORK"/needs-claude-fallback.$WAVE.$num.json; do
+    # Find the newest marker (by mtime) across both layouts.
+    for f in $(ls -t "$WORK"/needs-claude-fallback.$WAVE.$num.*.json \
+                       "$WORK"/needs-claude-fallback.$WAVE.$num.json \
+                       2>/dev/null); do
       [ -r "$f" ] && fb_marker="$f" && break
     done
-    # Match any existing reply (either path layout).
-    for f in "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
-             "$WORK"/claude-fallback-result.$WAVE.$num.json; do
-      [ -r "$f" ] && fb_result="$f" && break
-    done
+    if [ -n "$fb_marker" ]; then
+      # Derived result path must match marker generation exactly.
+      fb_result="$(echo "$fb_marker" | sed 's/needs-claude-fallback/claude-fallback-result/')"
+      [ -r "$fb_result" ] || fb_result=""
+    else
+      # No marker: check if a matching result without a surviving marker
+      # is present (marker could have been rm'd by the worker). Use the
+      # NEWEST result file if multiple exist — older ones are stale replies.
+      for f in $(ls -t "$WORK"/claude-fallback-result.$WAVE.$num.*.json \
+                         "$WORK"/claude-fallback-result.$WAVE.$num.json \
+                         2>/dev/null); do
+        [ -r "$f" ] && fb_result="$f" && break
+      done
+    fi
 
     if [ -z "$fb_marker" ] && [ -z "$fb_result" ]; then
       GATE_ATTEMPT="4-resume-regate" \
