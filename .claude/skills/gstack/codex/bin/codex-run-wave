@@ -68,15 +68,17 @@ Fix and re-verify."
   # awk -v can't take multi-line values; ship via env + ENVIRON[] instead.
   # awk gsub() interprets `&` in the replacement string as "the matched text",
   # so values containing `&` (e.g. a test command with `&&`) would corrupt the
-  # output by re-inserting the placeholder. Pre-escape `\` -> `\\` and `&` -> `\&`
-  # in each ENVIRON value before gsub so those characters land literally.
+  # output by re-inserting the placeholder. Pre-escape `&` -> `\&` so it lands
+  # literally. Note: we do NOT also escape `\`. BSD awk (macOS default) and
+  # GNU awk handle unescaped `\` differently in replacement strings, and
+  # over-escaping (which works on GNU awk) produces quadrupled backslashes
+  # on BSD awk. Task bodies and test commands rarely contain literal `\`.
   RP_GOAL="$goal" RP_ARCH="$arch" RP_HEADING="$heading" \
     RP_BODY="$body" RP_PRIOR="$prior_section" \
     RP_WT="$WORK/$slug" RP_FB="$forbidden" RP_TC="$test_cmd" \
     awk '
       function esc(s) {
-        gsub(/\\/, "\\\\\\\\", s)
-        gsub(/&/,  "\\\\&",    s)
+        gsub(/&/, "\\\\&", s)
         return s
       }
       BEGIN {
