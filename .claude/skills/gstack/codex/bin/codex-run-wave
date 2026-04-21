@@ -20,7 +20,7 @@
 # Portability: bash 3.2 compatible (no declare -A, no wait -n).
 set -euo pipefail
 
-WORK="" WAVE="" BASE="" PLAN_JSON="" MAX_PARALLEL=4 TIMEOUT=1800
+WORK="" WAVE="" BASE="" PLAN_JSON="" MAX_PARALLEL=4 TIMEOUT=1800 ONLY_TASK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --work-dir)      WORK="$2"; shift 2 ;;
@@ -29,6 +29,7 @@ while [ $# -gt 0 ]; do
     --plan-json)     PLAN_JSON="$2"; shift 2 ;;
     --max-parallel)  MAX_PARALLEL="$2"; shift 2 ;;
     --task-timeout)  TIMEOUT="$2"; shift 2 ;;
+    --only-task)     ONLY_TASK="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -41,6 +42,16 @@ PROMPT_TMPL="$SKILL_DIR/codex-implementer-prompt.md"
 # tasks in this wave (newline-separated numbers)
 wave_tasks="$(jq -r --argjson w "$WAVE" \
   '.waves[] | select(.wave == $w) | .tasks[]' "$PLAN_JSON")"
+
+# With --only-task, narrow the wave down to a single task. Other tasks in
+# the same wave are not dispatched this run.
+if [ -n "$ONLY_TASK" ]; then
+  filtered=""
+  for t in $wave_tasks; do
+    if [ "$t" = "$ONLY_TASK" ]; then filtered="$t"; fi
+  done
+  wave_tasks="$filtered"
+fi
 
 task_meta() {  # $1 = task num; emits json
   jq --argjson n "$1" '.tasks[] | select(.num == $n)' "$PLAN_JSON"
@@ -256,7 +267,24 @@ reap_all() {
   active_pids=()
 }
 
+STATE_JSON="$WORK/state.json"
 for n in $wave_tasks; do
+  # Skip tasks already in a terminal good state (passed-gate, merged) so
+  # --resume after a partial wave doesn't re-dispatch accepted work, which
+  # would regenerate commits from an already-advanced base and clobber
+  # surviving worktrees.
+  if [ -r "$STATE_JSON" ]; then
+    task_state="$(jq -r --argjson w "$WAVE" --argjson n "$n" \
+      '.waves[] | select(.wave == $w) | .tasks[] | select(.num == $n) | .status' \
+      "$STATE_JSON" 2>/dev/null || echo "")"
+    case "$task_state" in
+      passed-gate|merged)
+        echo "[WAVE $WAVE] task $n already $task_state; skipping" >&2
+        continue
+        ;;
+    esac
+  fi
+
   process_one "$n" &
   active_pids+=("$!")
   while [ "${#active_pids[@]}" -ge "$MAX_PARALLEL" ]; do

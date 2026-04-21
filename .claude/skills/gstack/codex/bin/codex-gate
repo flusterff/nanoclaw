@@ -116,6 +116,12 @@ stage_spec() {
         echo "=== STAGE 3: TIMED OUT waiting for Claude spec check ==="
         echo "marker file still present: $MARKER_IN"
       } > "$ff"
+      # Clean up any stale markers so a retry doesn't consume a delayed
+      # reviewer response against the previous attempt's diff. A Claude
+      # reply arriving after the timeout would otherwise sit at
+      # MARKER_OUT and be picked up immediately by the next attempt,
+      # reporting PASS/FAIL against the wrong worktree state.
+      rm -f "$MARKER_IN" "$MARKER_OUT"
       return 1
     fi
   done

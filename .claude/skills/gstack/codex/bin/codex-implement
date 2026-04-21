@@ -167,8 +167,26 @@ if [ "$FORCE_CLEAN" -eq 1 ]; then
   done
 fi
 
+# Resolve --only-task: if set, find which wave the task lives in and skip all
+# other waves entirely. This makes the canary path actually canary — a single
+# task runs, gets gated, gets merged; unrelated tasks from other waves stay
+# untouched.
+only_wave=""
+if [ -n "$ONLY_TASK" ]; then
+  only_wave="$(jq -r --argjson n "$ONLY_TASK" \
+    '.waves[] | select(.tasks | index($n)) | .wave' "$PLAN_JSON" 2>/dev/null | head -1)"
+  if [ -z "$only_wave" ] || [ "$only_wave" = "null" ]; then
+    echo "ERROR: --only-task $ONLY_TASK does not match any task in the plan" >&2
+    exit 2
+  fi
+  echo "only-task mode: running task $ONLY_TASK in wave $only_wave; all other waves skipped"
+fi
+
 total_waves="$(jq '.waves | length' "$PLAN_JSON")"
 for wave in $(seq 1 "$total_waves"); do
+  if [ -n "$only_wave" ] && [ "$wave" != "$only_wave" ]; then
+    continue
+  fi
   wstate="$(jq -r --argjson w "$wave" '.waves[] | select(.wave == $w) | .status' "$STATE")"
   if [ "$wstate" = "completed" ]; then
     echo "[WAVE $wave/$total_waves] skipped (already completed)"
@@ -177,17 +195,20 @@ for wave in $(seq 1 "$total_waves"); do
   "$BIN/codex-state" set-wave-status "$WORK" --wave "$wave" --status in_progress
   echo "[WAVE $wave/$total_waves] starting"
 
+  only_task_args=()
+  if [ -n "$ONLY_TASK" ]; then only_task_args=(--only-task "$ONLY_TASK"); fi
+
   if ! "$BIN/codex-run-wave" \
         --work-dir "$WORK" --wave "$wave" --base "$BASE" \
         --plan-json "$PLAN_JSON" --max-parallel "$MAX_PAR" \
-        --task-timeout "$TO"; then
+        --task-timeout "$TO" "${only_task_args[@]+"${only_task_args[@]}"}"; then
     echo "[WAVE $wave] escalated; state checkpointed at $STATE"
     exit 2
   fi
 
   if ! "$BIN/codex-merge-wave" \
         --work-dir "$WORK" --wave "$wave" --base "$BASE" \
-        --plan-json "$PLAN_JSON"; then
+        --plan-json "$PLAN_JSON" "${only_task_args[@]+"${only_task_args[@]}"}"; then
     echo "[WAVE $wave] merge or post-wave test failed; state checkpointed"
     exit 2
   fi

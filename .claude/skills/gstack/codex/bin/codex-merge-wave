@@ -13,13 +13,14 @@
 # run the post-wave global test command. If red, escalate.
 set -euo pipefail
 
-WORK="" WAVE="" BASE="" PLAN_JSON=""
+WORK="" WAVE="" BASE="" PLAN_JSON="" ONLY_TASK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --work-dir)  WORK="$2"; shift 2 ;;
     --wave)      WAVE="$2"; shift 2 ;;
     --base)      BASE="$2"; shift 2 ;;
     --plan-json) PLAN_JSON="$2"; shift 2 ;;
+    --only-task) ONLY_TASK="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -29,6 +30,14 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$SKILL_DIR/bin"
 
 tasks="$(jq -r --argjson w "$WAVE" '.waves[] | select(.wave == $w) | .tasks | sort | .[]' "$PLAN_JSON")"
+# With --only-task, merge only that task; leave other branches in this wave alone.
+if [ -n "$ONLY_TASK" ]; then
+  filtered=""
+  for t in $tasks; do
+    if [ "$t" = "$ONLY_TASK" ]; then filtered="$t"; fi
+  done
+  tasks="$filtered"
+fi
 plan_slug="$(basename "$WORK")"
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
@@ -65,14 +74,19 @@ done
 # failure here would leave state.json at "completed" even though the wave is
 # broken, and codex-implement --resume would skip it on the next run — leaking
 # merged commits that no resumable repair path covers.
-global_test="$(jq -r '.test_command' "$PLAN_JSON")"
-if [ -n "$global_test" ] && [ "$global_test" != "null" ]; then
-  if ! bash -c "$global_test"; then
-    "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status in_progress
-    echo "ESCALATE wave=$WAVE reason=post-wave-global-test-failed" >&2
-    exit 2
+# In --only-task mode we skip both the global test (the partial wave is not
+# expected to satisfy the plan's full-wave invariant) and the wave completion
+# flag (other tasks in this wave still need to run on a later invocation).
+if [ -z "$ONLY_TASK" ]; then
+  global_test="$(jq -r '.test_command' "$PLAN_JSON")"
+  if [ -n "$global_test" ] && [ "$global_test" != "null" ]; then
+    if ! bash -c "$global_test"; then
+      "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status in_progress
+      echo "ESCALATE wave=$WAVE reason=post-wave-global-test-failed" >&2
+      exit 2
+    fi
   fi
+  "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
 fi
 
-"$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
 exit 0
