@@ -68,7 +68,12 @@ export PATH="$TMP/stubs:$PATH"
 GSTACK_HOME="$TMP/.gstack"
 export GSTACK_HOME
 
-WORK="$GSTACK_HOME/codex-work/rollback-plan"
+# Derive the slug the way codex-implement does.
+_plan_path="$THIS_DIR/fixtures/rollback-plan.md"
+_plan_abs="$(cd "$(dirname "$_plan_path")" && pwd)/$(basename "$_plan_path")"
+_repo_id="$(cd "$REPO" && git rev-parse --show-toplevel | xargs basename)"
+_hash="$(printf '%s' "$_plan_abs" | shasum -a 1 | cut -c1-8)"
+WORK="$GSTACK_HOME/codex-work/${_repo_id}--rollback-plan--${_hash}"
 
 # Background Claude-simulator: writes spec-check-result for every needs-spec-check
 (

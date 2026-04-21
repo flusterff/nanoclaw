@@ -75,7 +75,11 @@ export PATH="$TMP/stubs:$PATH"
 
 GSTACK_HOME="$TMP/.gstack"
 export GSTACK_HOME
-WORK="$GSTACK_HOME/codex-work/plan-amp"
+# Match the slug produced by codex-implement: <repo-id>--<plan-base>--<path-hash>.
+_plan_abs="$(cd "$(dirname "$TMP/plan-amp.md")" && pwd)/plan-amp.md"
+_repo_id="$(cd "$REPO" && git rev-parse --show-toplevel | xargs basename)"
+_hash="$(printf '%s' "$_plan_abs" | shasum -a 1 | cut -c1-8)"
+WORK="$GSTACK_HOME/codex-work/${_repo_id}--plan-amp--${_hash}"
 
 # Claude simulator writes PASS spec-check result
 (

@@ -58,7 +58,12 @@ export PATH="$TMP/stubs:$PATH"
 GSTACK_HOME="$TMP/.gstack"
 export GSTACK_HOME
 
-WORK="$GSTACK_HOME/codex-work/e2e-plan"
+# Derive the slug the way codex-implement does (repo name + plan basename + path hash).
+_plan_path="$THIS_DIR/fixtures/e2e-plan.md"
+_plan_abs="$(cd "$(dirname "$_plan_path")" && pwd)/$(basename "$_plan_path")"
+_repo_id="$(cd "$REPO" && git rev-parse --show-toplevel | xargs basename)"
+_hash="$(printf '%s' "$_plan_abs" | shasum -a 1 | cut -c1-8)"
+WORK="$GSTACK_HOME/codex-work/${_repo_id}--e2e-plan--${_hash}"
 
 # Claude simulator: writes spec-check-result whenever a needs-spec-check appears.
 (

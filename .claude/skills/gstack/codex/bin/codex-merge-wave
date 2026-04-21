@@ -61,14 +61,18 @@ Co-Authored-By: Claude (claude-opus-4-6) <noreply@anthropic.com>"
   "$BIN/codex-worktree" teardown "$WORK" "$slug" > /dev/null
 done
 
-"$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
-
+# Run the post-wave global test BEFORE marking the wave completed. Otherwise a
+# failure here would leave state.json at "completed" even though the wave is
+# broken, and codex-implement --resume would skip it on the next run — leaking
+# merged commits that no resumable repair path covers.
 global_test="$(jq -r '.test_command' "$PLAN_JSON")"
 if [ -n "$global_test" ] && [ "$global_test" != "null" ]; then
   if ! bash -c "$global_test"; then
+    "$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status in_progress
     echo "ESCALATE wave=$WAVE reason=post-wave-global-test-failed" >&2
     exit 2
   fi
 fi
 
+"$BIN/codex-state" set-wave-status "$WORK" --wave "$WAVE" --status completed
 exit 0

@@ -24,12 +24,12 @@ WORK_ROOT="$GSTACK_HOME/codex-work"
 mkdir -p "$WORK_ROOT"
 
 PLAN=""
-BASE=""; DRY=0; RESUME=0; ROLLBACK=0; ONLY_TASK=""
+BASE=""; BASE_EXPLICIT=0; DRY=0; RESUME=0; ROLLBACK=0; ONLY_TASK=""
 MAX_PAR=4; TO=1800; FORCE=0; FORCE_CLEAN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base)         BASE="$2"; shift 2 ;;
+    --base)         BASE="$2"; BASE_EXPLICIT=1; shift 2 ;;
     --dry-run)      DRY=1; shift ;;
     --resume)       RESUME=1; shift ;;
     --rollback)     ROLLBACK=1; shift ;;
@@ -44,7 +44,15 @@ while [ $# -gt 0 ]; do
 done
 [ -r "$PLAN" ] || { echo "usage: codex-implement <plan-file> [...]" >&2; exit 2; }
 
-plan_slug="$(basename "$PLAN" .md)"
+# Namespace the work dir by repo + plan path so two plans named plan.md in
+# different repos (or two plans named plan.md at different paths inside the
+# same repo) don't collide at ~/.gstack/codex-work/plan and corrupt each
+# other's lock / state.json / markers / sub-worktrees.
+_plan_base="$(basename "$PLAN" .md)"
+_plan_path_abs="$(cd "$(dirname "$PLAN")" && pwd)/$(basename "$PLAN")"
+_repo_id="$(git rev-parse --show-toplevel 2>/dev/null | xargs -I{} basename {} 2>/dev/null || echo no-repo)"
+_path_hash="$(printf '%s' "$_plan_path_abs" | shasum -a 1 2>/dev/null | cut -c1-8)"
+plan_slug="${_repo_id}--${_plan_base}--${_path_hash}"
 WORK="$WORK_ROOT/$plan_slug"
 mkdir -p "$WORK"
 
@@ -112,6 +120,15 @@ fi
 if [ "$ROLLBACK" -eq 1 ]; then
   STATE="$WORK/state.json"
   [ -r "$STATE" ] || { echo "nothing to roll back"; exit 0; }
+  # If --base wasn't explicitly provided for this invocation, use whichever
+  # base_ref the original run recorded. Otherwise a plan run against
+  # `release/v2` would get reverted on top of today's default `main`.
+  if [ "$BASE_EXPLICIT" -eq 0 ]; then
+    recorded_base="$(jq -r '.base_ref // empty' "$STATE")"
+    if [ -n "$recorded_base" ]; then
+      BASE="$recorded_base"
+    fi
+  fi
   shas="$(jq -r '.waves[].tasks[] | select(.final_commit_on_base != null) | .final_commit_on_base' "$STATE" \
           | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}')"
   git checkout -q "$BASE"
