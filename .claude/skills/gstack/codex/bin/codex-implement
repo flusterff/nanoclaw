@@ -102,7 +102,15 @@ else
 fi
 
 PLAN_JSON="$WORK/plan.json"
-"$BIN/codex-parse-plan" "$PLAN" > "$PLAN_JSON"
+# Rollback should work even if the plan now fails to parse (e.g. a task was
+# renamed into a duplicate slug after the original run). Rollback only needs
+# state.json, which has the recorded task nums/slugs/commits. Skip re-parsing
+# in that case and reuse whatever plan.json the original run wrote.
+if [ "$ROLLBACK" -eq 1 ] && [ -r "$PLAN_JSON" ]; then
+  : # use the cached plan.json as-is
+else
+  "$BIN/codex-parse-plan" "$PLAN" > "$PLAN_JSON"
+fi
 
 # Even when --base was provided explicitly, reject remote-tracking refs.
 # codex-merge-wave checks them out and commits into them, but a remote ref
@@ -176,7 +184,14 @@ if [ "$ROLLBACK" -eq 1 ]; then
   # policy, then delete their task branches. Without this, a subsequent run
   # of the same plan would fail in codex-worktree setup with
   # "fatal: a branch named codex/<plan>/<slug> already exists".
-  for sl in $(jq -r '.tasks[].slug' "$PLAN_JSON" 2>/dev/null); do
+  # Use slugs from state.json (the recorded run) rather than the current
+  # plan.json, in case the plan was edited after the run (task renames would
+  # otherwise leave the original branches behind).
+  rollback_slugs="$(jq -r '.waves[].tasks[].slug // empty' "$STATE" 2>/dev/null)"
+  if [ -z "$rollback_slugs" ]; then
+    rollback_slugs="$(jq -r '.tasks[].slug' "$PLAN_JSON" 2>/dev/null)"
+  fi
+  for sl in $rollback_slugs; do
     [ -z "$sl" ] && continue
     if [ -d "$WORK/$sl" ]; then
       "$BIN/codex-worktree" teardown "$WORK" "$sl" > /dev/null 2>&1 || true
