@@ -426,6 +426,7 @@ PYEOF
       --prompt-file "$prompt_file" \
       --reasoning "$reasoning" \
       --session-file "$sid_file" \
+      --findings-out "$WORK/findings.$WAVE.$num.$attempt.txt" \
       --timeout "$TIMEOUT")"
 
     "$BIN/codex-state" append-attempt "$WORK" \
@@ -434,7 +435,7 @@ PYEOF
       --session-id "$(cat "$sid_file" 2>/dev/null || echo '')" \
       --result "$status"
 
-    if [ "$status" = "BLOCKED" ] || [ "$status" = "NEEDS_CONTEXT" ]; then
+    if [ "$status" = "BLOCKED" ] || [ "$status" = "NEEDS_CONTEXT" ] || [ "$status" = "PLUGIN_ERROR" ]; then
       gate_status="FAIL dispatch"
     else
       "$BIN/codex-state" set-status "$WORK" --wave "$WAVE" --task "$num" --status gate-check
