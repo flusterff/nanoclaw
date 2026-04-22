@@ -7,7 +7,7 @@ work directory.
 
 ## Marker files
 
-**`needs-spec-check.<wave>.<task-num>.json`** — bash writes when a task
+**`needs-spec-check.<wave>.<task-num>.<attempt>.json`** — bash writes when a task
 reaches Stage 3. Schema:
 
 ```json
@@ -20,9 +20,18 @@ reaches Stage 3. Schema:
   "base": "origin/main",
   "worktree_path": "...",
   "diff_file": ".../diff.txt",
+  "prior_attempt_findings": "",
   "requested_at": "2026-04-15T..."
 }
 ```
+
+`prior_attempt_findings` carries the contents of the preceding attempt's
+findings file (`findings.<wave>.<task>.<attempt-1>.txt`) when `attempt > 1`,
+or an empty string otherwise. It lets the spec-reviewer subagent understand
+why the current diff contains changes that aren't spelled out in the literal
+task spec — typically a stage-1 test failure that codex recovered from on
+the next attempt. The reviewer is instructed to PASS recovery changes that
+aren't in the literal spec but plausibly fix the documented prior failure.
 
 Claude reads the marker, renders `spec-reviewer-prompt.md` with it, dispatches
 a Task() subagent, writes the result to:
