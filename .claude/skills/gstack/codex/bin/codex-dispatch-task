@@ -1,21 +1,25 @@
-#!/usr/bin/env bash
-# Run a single Codex attempt. Stream JSONL to log file. Parse the final status
-# code from the last message. Print just the status code (DONE/BLOCKED/etc) on stdout.
+#!/bin/bash
+# Single-task dispatch via codex-plugin-cc (codex-companion.mjs task).
+# Replaces the previous direct `codex exec` shell-out. See:
+#   docs/superpowers/specs/2026-04-22-codex-dispatch-plugin-port-design.md
+#
+# Status contract (stdout, exit 0):
+#   DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED | PLUGIN_ERROR
 #
 # Options:
-#   --worktree <dir>        working root for codex
-#   --log <file>            JSONL output log
-#   --prompt-file <file>    rendered prompt (plain text)
-#   --reasoning <lvl>       low|medium|high|xhigh
-#   --session-file <file>   path; if exists, we resume the session id written
-#                           there; in any case we write the new session id
-#                           (or a synthesized one if codex didn't expose it).
-#   --timeout <sec>         optional, default 1800
+#   --worktree <dir>        working root
+#   --log <file>            pretty-printed plugin payload + reasoning + files
+#   --prompt-file <file>    rendered prompt (passed to plugin via --prompt-file)
+#   --reasoning <lvl>       low|medium|high|xhigh → plugin --effort
+#   --session-file <file>   truncated at start; holds plugin threadId on any
+#                           valid JSON response (success or failure)
+#   --findings-out <file>   if set, dispatch writes synthetic findings file
+#                           on BLOCKED/NEEDS_CONTEXT exit (for next attempt's
+#                           render_prompt to pick up)
+#   --timeout <sec>         optional, default 1800; wraps plugin invocation
 set -euo pipefail
 
-CODEX="${CODEX_BIN:-codex}"
-
-WT=""; LOG=""; PROMPT_FILE=""; REASONING="high"; SID_FILE=""; TO=1800
+WT=""; LOG=""; PROMPT_FILE=""; REASONING="high"; SID_FILE=""; FINDINGS_OUT=""; TO=1800
 while [ $# -gt 0 ]; do
   case "$1" in
     --worktree)     WT="$2"; shift 2 ;;
@@ -23,6 +27,7 @@ while [ $# -gt 0 ]; do
     --prompt-file)  PROMPT_FILE="$2"; shift 2 ;;
     --reasoning)    REASONING="$2"; shift 2 ;;
     --session-file) SID_FILE="$2"; shift 2 ;;
+    --findings-out) FINDINGS_OUT="$2"; shift 2 ;;
     --timeout)      TO="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -32,25 +37,30 @@ done
 : "${PROMPT_FILE:?--prompt-file required}"
 : "${SID_FILE:?--session-file required}"
 
-prompt="$(cat "$PROMPT_FILE")"
-
-mkdir -p "$(dirname "$LOG")"
-
-args=(exec
-  -s workspace-write
-  -C "$WT"
-  -c "model_reasoning_effort=\"$REASONING\""
-  --enable web_search_cached
-  --json)
-
-if [ -s "$SID_FILE" ]; then
-  args=(exec resume "$(cat "$SID_FILE")"
-    -C "$WT"
-    -c "model_reasoning_effort=\"$REASONING\""
-    --enable web_search_cached
-    --json)
+# ---- Resolve plugin path (CODEX_COMPANION env override wins; else pick
+# max_by(installedAt) from installed_plugins.json; normalize singleton→array
+# just in case Claude ever changes the shape). Guard every failure with
+# || true to avoid set -e aborting before we emit PLUGIN_ERROR.
+if [ -z "${CODEX_COMPANION:-}" ]; then
+  CODEX_COMPANION="$(
+    jq -r '
+      (.plugins["codex@openai-codex"] | if type == "array" then . else [.] end)
+      | max_by(.installedAt)
+      | .installPath + "/scripts/codex-companion.mjs"
+    ' "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null || true
+  )"
 fi
 
+if [ -z "$CODEX_COMPANION" ] || [ ! -f "$CODEX_COMPANION" ]; then
+  echo "codex-plugin-cc not installed; run /codex:setup" >&2
+  echo "PLUGIN_ERROR"
+  exit 0
+fi
+
+mkdir -p "$(dirname "$LOG")"
+: > "$SID_FILE"  # truncate first — never leak stale threadId from prior attempt
+
+# ---- Invoke plugin task (timeout wrapper for belt-over-suspenders).
 if command -v timeout >/dev/null 2>&1; then
   TO_CMD=(timeout "$TO")
 elif command -v gtimeout >/dev/null 2>&1; then
@@ -59,49 +69,114 @@ else
   TO_CMD=()
 fi
 
-tmp_out="$(mktemp)"
-trap 'rm -f "$tmp_out"' EXIT
+# Plugin resolves workspaceRoot from cwd, so cd into $WT before invoking.
+tmp_stdout="$(mktemp)"
+tmp_stderr="$(mktemp)"
+trap 'rm -f "$tmp_stdout" "$tmp_stderr"' EXIT
 
 set +e
-"${TO_CMD[@]+"${TO_CMD[@]}"}" "$CODEX" "${args[@]}" "$prompt" > "$tmp_out" 2>&1
+( cd "$WT" && "${TO_CMD[@]+"${TO_CMD[@]}"}" node "$CODEX_COMPANION" \
+    task --fresh --write --json \
+    --effort "$REASONING" \
+    --prompt-file "$PROMPT_FILE" ) \
+  > "$tmp_stdout" 2> "$tmp_stderr"
 rc=$?
 set -e
 
-cat "$tmp_out" >> "$LOG"
-
-# jq may return non-zero on non-JSON output (e.g. test stubs that just echo
-# "DONE"). Under set -euo pipefail this would abort the script; tolerate it.
-{ jq -r 'select(.session_id != null) | .session_id' "$tmp_out" 2>/dev/null || true; } \
-  | tail -n1 > "$SID_FILE.new" || true
-if [ -s "$SID_FILE.new" ]; then mv "$SID_FILE.new" "$SID_FILE"; else rm -f "$SID_FILE.new"; fi
-
-final_text="$({ jq -r 'select(.text != null) | .text' "$tmp_out" 2>/dev/null || true; } | tail -n1)"
-if [ -z "$final_text" ]; then
-  final_text="$(tail -n 5 "$tmp_out")"
+# ---- Timeout or spawn failure → PLUGIN_ERROR.
+if [ "$rc" -eq 124 ] || [ "$rc" -ne 0 ] && [ ! -s "$tmp_stdout" ]; then
+  {
+    echo "=== dispatch attempt — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    echo "PLUGIN_ERROR: plugin invocation failed (rc=$rc)"
+    if [ "$rc" -eq 124 ]; then echo "dispatch timeout after $TO seconds"; fi
+    echo "--- stderr ---"
+    cat "$tmp_stderr"
+  } >> "$LOG"
+  echo "PLUGIN_ERROR"
+  exit 0
 fi
 
-case "$final_text" in
+# ---- Parse plugin JSON. If parse fails → PLUGIN_ERROR.
+if ! jq -e type "$tmp_stdout" >/dev/null 2>&1; then
+  {
+    echo "=== dispatch attempt — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    echo "PLUGIN_ERROR: plugin output was not valid JSON (rc=$rc)"
+    echo "--- raw stdout (first 2KB) ---"
+    head -c 2048 "$tmp_stdout"
+    echo
+    echo "--- stderr ---"
+    cat "$tmp_stderr"
+  } >> "$LOG"
+  echo "PLUGIN_ERROR"
+  exit 0
+fi
+
+plugin_status="$(jq -r '.status // 1' "$tmp_stdout")"
+thread_id="$(jq -r '.threadId // empty' "$tmp_stdout")"
+raw_output="$(jq -r '.rawOutput // ""' "$tmp_stdout")"
+touched_files="$(jq -r '.touchedFiles // [] | join("\n")' "$tmp_stdout")"
+reasoning_trace="$(jq -r '.reasoningSummary // [] | join("\n\n")' "$tmp_stdout")"
+
+# Always record threadId on any valid plugin JSON (success OR failure).
+if [ -n "$thread_id" ] && [ "$thread_id" != "null" ]; then
+  echo "$thread_id" > "$SID_FILE"
+fi
+
+# Write log entry.
+{
+  echo "=== dispatch attempt — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+  echo "Plugin payload:"
+  jq . "$tmp_stdout" 2>/dev/null || cat "$tmp_stdout"
+  echo
+  echo "--- reasoning summary ---"
+  if [ -n "$reasoning_trace" ]; then echo "$reasoning_trace"; else echo "(none)"; fi
+  echo
+  echo "--- touched files ---"
+  if [ -n "$touched_files" ]; then echo "$touched_files"; else echo "(none)"; fi
+  if [ -s "$tmp_stderr" ]; then
+    echo
+    echo "--- stderr ---"
+    cat "$tmp_stderr"
+  fi
+} >> "$LOG"
+
+# ---- Status mapping.
+if [ "$plugin_status" != "0" ]; then
+  echo "PLUGIN_ERROR"
+  exit 0
+fi
+
+case "$raw_output" in
   *DONE_WITH_CONCERNS*) status="DONE_WITH_CONCERNS" ;;
   *DONE*)                status="DONE" ;;
   *NEEDS_CONTEXT*)       status="NEEDS_CONTEXT" ;;
   *BLOCKED*)             status="BLOCKED" ;;
-  *)
-    if [ "$rc" -eq 124 ]; then
-      status="BLOCKED"
-    elif [ "$rc" -ne 0 ]; then
-      status="BLOCKED"
-    else
-      status="DONE_WITH_CONCERNS"
-    fi
-    ;;
+  *)                     status="DONE_WITH_CONCERNS" ;;
 esac
 
-# Auto-commit codex's changes. codex exec -s workspace-write cannot write to
-# the parent repo's .git/worktrees/<name>/ (git-worktree metadata lives
-# outside the codex sandbox), so git commits from inside the model fail
+# ---- Findings synthesis on dispatch failure (BLOCKED or NEEDS_CONTEXT).
+# render_prompt in codex-run-wave picks this up on the next attempt.
+if [ -n "$FINDINGS_OUT" ] && { [ "$status" = "BLOCKED" ] || [ "$status" = "NEEDS_CONTEXT" ]; }; then
+  {
+    echo "Prior dispatch attempt returned $status without running the implementation to completion."
+    echo
+    echo "What Codex reported in its final message:"
+    if [ -n "$raw_output" ]; then echo "$raw_output"; else echo "(empty)"; fi
+    echo
+    echo "Reasoning trace:"
+    if [ -n "$reasoning_trace" ]; then echo "$reasoning_trace"; else echo "(none)"; fi
+    echo
+    echo "Files touched by the failed attempt (may be incomplete or half-applied):"
+    if [ -n "$touched_files" ]; then echo "$touched_files"; else echo "(none)"; fi
+  } > "$FINDINGS_OUT"
+fi
+
+# ---- Auto-commit codex's changes. Codex's app-server sandbox (workspace-write)
+# can't write to $WT/.git/worktrees/<name>/ (git-worktree metadata lives
+# outside the codex sandbox), so commits from inside the model fail
 # silently. Bash runs outside the sandbox, so we commit here on its behalf
-# whenever codex thinks it finished the work. Skip on BLOCKED/NEEDS_CONTEXT
-# (the wave will retry or escalate; half-done work should not be squashed).
+# whenever codex thinks it finished work. Skip on BLOCKED/NEEDS_CONTEXT
+# (half-done work should not be squashed; the wave will retry or escalate).
 if [ "$status" = "DONE" ] || [ "$status" = "DONE_WITH_CONCERNS" ]; then
   if (cd "$WT" && [ -n "$(git status --porcelain 2>/dev/null)" ]); then
     (cd "$WT" \
