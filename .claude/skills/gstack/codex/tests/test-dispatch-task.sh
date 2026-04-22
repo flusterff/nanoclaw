@@ -116,15 +116,18 @@ CODEX_COMPANION_FAKE_PAYLOAD="$TMP/payload.commit.json" \
 # Case F: regression — timeout with partial stdout must emit PLUGIN_ERROR.
 # A naive `[ rc=124 ] || [ rc!=0 ] && [ !s stdout ]` precedence bug would
 # skip PLUGIN_ERROR when the plugin wrote any stdout before timeout.
-cat > "$TMP/slow-fake.sh" <<'SCRIPT'
-#!/usr/bin/env bash
-# Write some stdout immediately, then sleep past the dispatch timeout.
-echo '{"status":0,"threadId":"t-slow","rawOutput":"partial","touchedFiles":[],"reasoningSummary":[]}'
-sleep 30
+# Dispatch invokes the companion via `node`, so the slow fake must be a
+# valid .mjs script — not bash — otherwise node would reject the source
+# before the sleep ever runs and the test would fail for the wrong reason.
+cat > "$TMP/slow-fake.mjs" <<'SCRIPT'
+#!/usr/bin/env node
+// Write partial JSON stdout immediately, then block past the dispatch timeout.
+process.stdout.write('{"status":0,"threadId":"t-slow","rawOutput":"partial","touchedFiles":[],"reasoningSummary":[]}\n');
+// Give stdout a moment to flush before we sleep.
+setTimeout(() => { /* keep process alive */ }, 30000);
 SCRIPT
-chmod +x "$TMP/slow-fake.sh"
 
-CODEX_COMPANION="$TMP/slow-fake.sh" \
+CODEX_COMPANION="$TMP/slow-fake.mjs" \
   "$DISPATCH" \
     --worktree "$WT" \
     --log "$LOGDIR/f.log" \
