@@ -65,6 +65,7 @@ chmod +x "$TMP/stubs/codex"
 export CODEX_CALL_LOG="$TMP/codex-exec-called.log"
 : > "$CODEX_CALL_LOG"
 export PATH="$TMP/stubs:$PATH"
+export CODEX_COMPANION="$THIS_DIR/codex-companion-fake.mjs"
 GSTACK_HOME="$TMP/.gstack"
 export GSTACK_HOME
 _plan_abs="$TMP/plan.md"

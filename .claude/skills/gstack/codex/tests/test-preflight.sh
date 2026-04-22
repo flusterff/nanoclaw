@@ -16,6 +16,7 @@ exit 0
 EOF
 chmod +x "$TMP/stubs/codex"
 export PATH="$TMP/stubs:$PATH"
+export CODEX_COMPANION="$THIS_DIR/codex-companion-fake.mjs"
 
 # Dirty tree: full run should refuse (but dry-run should not — verify below)
 echo dirt > dirt.txt
