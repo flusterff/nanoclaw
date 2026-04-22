@@ -56,7 +56,12 @@ findings_file() {
 stage_tests() {
   local attempt="$1" ff; ff="$(findings_file "$attempt")"
   local tmp; tmp="$(mktemp)"
-  if (cd "$WT" && bash -c "$TEST_CMD") > "$tmp" 2>&1; then
+  # REPO_ROOT="$WT" matches the codex-merge-wave invariant: tests can
+  # reference $REPO_ROOT for absolute paths regardless of which gate
+  # they're running under. Without this, a per-task `Run:` that uses
+  # $REPO_ROOT (per the documented invariant in SKILL.md) would fail
+  # stage 1 with an unset variable while passing the plan-level gate.
+  if (cd "$WT" && REPO_ROOT="$WT" bash -c "$TEST_CMD") > "$tmp" 2>&1; then
     rm -f "$tmp"; return 0
   fi
   {
