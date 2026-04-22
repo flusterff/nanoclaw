@@ -71,19 +71,24 @@ status="$(cat "$TMP/c.out")"
 [ "$status" = "PLUGIN_ERROR" ] || { echo "FAIL C: status=$status expected PLUGIN_ERROR"; exit 1; }
 [ "$(cat "$TMP/c.sid")" = "t-fail" ] || { echo "FAIL C: sid_file should record threadId even on failed turn, got $(cat "$TMP/c.sid")"; exit 1; }
 
-# Case D: missing plugin — CODEX_COMPANION unset and jq lookup fails.
-env -i PATH="/nonexistent" HOME="$HOME" TMPDIR="$TMP" \
-  "$DISPATCH" \
-    --worktree "$WT" \
-    --log "$LOGDIR/d.log" \
-    --prompt-file <(echo "minimal prompt") \
-    --reasoning high \
-    --session-file "$TMP/d.sid" \
-  > "$TMP/d.out" 2> "$TMP/d.err" || true
+# Case D: missing plugin — fake HOME has no installed_plugins.json; CODEX_COMPANION unset.
+# We intentionally keep real PATH here (dispatch uses mkdir/jq/dirname) and
+# only swap $HOME so the plugin lookup fails cleanly.
+mkdir -p "$TMP/fake-home/.claude/plugins"
+echo '{"version":2,"plugins":{}}' > "$TMP/fake-home/.claude/plugins/installed_plugins.json"
+( unset CODEX_COMPANION; HOME="$TMP/fake-home" \
+    "$DISPATCH" \
+      --worktree "$WT" \
+      --log "$LOGDIR/d.log" \
+      --prompt-file <(echo "minimal prompt") \
+      --reasoning high \
+      --session-file "$TMP/d.sid" \
+    > "$TMP/d.out" 2> "$TMP/d.err" || true )
 
 status="$(cat "$TMP/d.out")"
 [ "$status" = "PLUGIN_ERROR" ] || { echo "FAIL D: status=$status expected PLUGIN_ERROR for missing plugin"; exit 1; }
 grep -q "codex-plugin-cc not installed" "$TMP/d.err" || { echo "FAIL D: stderr missing install guidance"; exit 1; }
+grep -q "PLUGIN_ERROR: codex-plugin-cc not installed" "$LOGDIR/d.log" || { echo "FAIL D: log missing install guidance"; exit 1; }
 
 # Case E: auto-commit preserved — worktree changes get committed on DONE.
 cat > "$TMP/payload.commit.json" <<'EOF'
@@ -107,5 +112,50 @@ CODEX_COMPANION_FAKE_PAYLOAD="$TMP/payload.commit.json" \
 (cd "$WT" && git log --oneline | head -3 | grep -q "codex task: auto-commit") || {
   echo "FAIL E: auto-commit did not run on DONE"; exit 1;
 }
+
+# Case F: regression — timeout with partial stdout must emit PLUGIN_ERROR.
+# A naive `[ rc=124 ] || [ rc!=0 ] && [ !s stdout ]` precedence bug would
+# skip PLUGIN_ERROR when the plugin wrote any stdout before timeout.
+cat > "$TMP/slow-fake.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+# Write some stdout immediately, then sleep past the dispatch timeout.
+echo '{"status":0,"threadId":"t-slow","rawOutput":"partial","touchedFiles":[],"reasoningSummary":[]}'
+sleep 30
+SCRIPT
+chmod +x "$TMP/slow-fake.sh"
+
+CODEX_COMPANION="$TMP/slow-fake.sh" \
+  "$DISPATCH" \
+    --worktree "$WT" \
+    --log "$LOGDIR/f.log" \
+    --prompt-file <(echo "minimal prompt") \
+    --reasoning high \
+    --session-file "$TMP/f.sid" \
+    --timeout 2 \
+  > "$TMP/f.out"
+
+status="$(cat "$TMP/f.out")"
+[ "$status" = "PLUGIN_ERROR" ] || { echo "FAIL F: timeout-with-partial-stdout should be PLUGIN_ERROR, got $status"; exit 1; }
+grep -q "dispatch timeout" "$LOGDIR/f.log" || { echo "FAIL F: log missing timeout attribution"; exit 1; }
+
+# Case G: regression — missing-plugin path must truncate SID_FILE so the
+# PRIOR attempt's threadId doesn't leak into state.json as THIS attempt's.
+echo "stale-prior-thread-id" > "$TMP/g.sid"
+
+( unset CODEX_COMPANION; HOME="$TMP/fake-home" \
+    "$DISPATCH" \
+      --worktree "$WT" \
+      --log "$LOGDIR/g.log" \
+      --prompt-file <(echo "minimal prompt") \
+      --reasoning high \
+      --session-file "$TMP/g.sid" \
+    > "$TMP/g.out" 2> "$TMP/g.err" || true )
+
+status="$(cat "$TMP/g.out")"
+[ "$status" = "PLUGIN_ERROR" ] || { echo "FAIL G: status=$status expected PLUGIN_ERROR"; exit 1; }
+if [ -s "$TMP/g.sid" ]; then
+  echo "FAIL G: sid file still contains '$(cat "$TMP/g.sid")' — stale threadId leaked past missing-plugin exit"
+  exit 1
+fi
 
 echo "PASS: test-dispatch-task (all cases)"

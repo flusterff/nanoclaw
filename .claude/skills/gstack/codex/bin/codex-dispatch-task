@@ -37,6 +37,13 @@ done
 : "${PROMPT_FILE:?--prompt-file required}"
 : "${SID_FILE:?--session-file required}"
 
+# Truncate SID_FILE and set up LOG dir FIRST — before any early-return path
+# (plugin-not-installed, spawn failure, etc.). If we emit PLUGIN_ERROR without
+# truncating first, codex-run-wave records the PRIOR attempt's threadId against
+# this attempt in state.json (corrupts debugging history).
+mkdir -p "$(dirname "$LOG")"
+: > "$SID_FILE"
+
 # ---- Resolve plugin path (CODEX_COMPANION env override wins; else pick
 # max_by(installedAt) from installed_plugins.json; normalize singleton→array
 # just in case Claude ever changes the shape). Guard every failure with
@@ -52,13 +59,16 @@ if [ -z "${CODEX_COMPANION:-}" ]; then
 fi
 
 if [ -z "$CODEX_COMPANION" ] || [ ! -f "$CODEX_COMPANION" ]; then
+  {
+    echo "=== dispatch attempt — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    echo "PLUGIN_ERROR: codex-plugin-cc not installed"
+    echo "resolved CODEX_COMPANION: ${CODEX_COMPANION:-<empty>}"
+    echo "run /codex:setup to install"
+  } >> "$LOG"
   echo "codex-plugin-cc not installed; run /codex:setup" >&2
   echo "PLUGIN_ERROR"
   exit 0
 fi
-
-mkdir -p "$(dirname "$LOG")"
-: > "$SID_FILE"  # truncate first — never leak stale threadId from prior attempt
 
 # ---- Invoke plugin task (timeout wrapper for belt-over-suspenders).
 if command -v timeout >/dev/null 2>&1; then
@@ -84,11 +94,34 @@ rc=$?
 set -e
 
 # ---- Timeout or spawn failure → PLUGIN_ERROR.
-if [ "$rc" -eq 124 ] || [ "$rc" -ne 0 ] && [ ! -s "$tmp_stdout" ]; then
+# Timeout (rc=124) is ALWAYS PLUGIN_ERROR regardless of whether the plugin
+# managed to write partial stdout before being killed. A non-zero exit with
+# empty stdout is also PLUGIN_ERROR. A non-zero exit with non-empty stdout
+# is left to the JSON-parse path below — the payload may contain status=1
+# which gets mapped to PLUGIN_ERROR there, or it may be malformed and get
+# caught by the jq validity check.
+#
+# NOTE: `[ A ] || [ B ] && [ C ]` parses as `([ A ] || [ B ]) && [ C ]` in
+# POSIX shells, which makes a timeout with partial stdout silently fall
+# through to the parse path. Keep the two arms explicit.
+if [ "$rc" -eq 124 ]; then
   {
     echo "=== dispatch attempt — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-    echo "PLUGIN_ERROR: plugin invocation failed (rc=$rc)"
-    if [ "$rc" -eq 124 ]; then echo "dispatch timeout after $TO seconds"; fi
+    echo "PLUGIN_ERROR: dispatch timeout after $TO seconds (rc=$rc)"
+    echo "--- partial stdout (first 2KB) ---"
+    head -c 2048 "$tmp_stdout" 2>/dev/null || true
+    echo
+    echo "--- stderr ---"
+    cat "$tmp_stderr"
+  } >> "$LOG"
+  echo "PLUGIN_ERROR"
+  exit 0
+fi
+
+if [ "$rc" -ne 0 ] && [ ! -s "$tmp_stdout" ]; then
+  {
+    echo "=== dispatch attempt — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    echo "PLUGIN_ERROR: plugin invocation failed with empty stdout (rc=$rc)"
     echo "--- stderr ---"
     cat "$tmp_stderr"
   } >> "$LOG"
