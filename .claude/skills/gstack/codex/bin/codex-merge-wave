@@ -458,7 +458,12 @@ if [ -n "$ONLY_TASK" ]; then
         # a sentinel file on first run) would pass once then fail here.
         if [ -n "$plan_test" ] && [ "$plan_test" != "null" ] && \
            [ "$canary_plan_test_passed" -ne 1 ]; then
-          if ! bash -c "$plan_test" >/dev/null 2>&1; then
+          # REPO_ROOT="$PWD" matches the documented invariant in SKILL.md
+          # so plan-level Test commands can reference $REPO_ROOT here too.
+          # Without this, an --only-task completion-path plan_test that
+          # uses $REPO_ROOT would fail with an unset variable while the
+          # same command would pass under the main full-wave path.
+          if ! REPO_ROOT="$PWD" bash -c "$plan_test" >/dev/null 2>&1; then
             plan_test_ok=0
           else
             touch "$PLAN_TEST_OK_SENTINEL"
@@ -508,7 +513,9 @@ if [ -n "$ONLY_TASK" ]; then
           plan_test_ok=1
           if [ -n "$plan_test" ] && [ "$plan_test" != "null" ] && \
              [ "$canary_plan_test_passed" -ne 1 ]; then
-            if ! bash -c "$plan_test" >/dev/null 2>&1; then
+            # REPO_ROOT="$PWD" matches the documented invariant — see
+            # the matching call site ~50 lines above for the rationale.
+            if ! REPO_ROOT="$PWD" bash -c "$plan_test" >/dev/null 2>&1; then
               plan_test_ok=0
             else
               touch "$PLAN_TEST_OK_SENTINEL"
