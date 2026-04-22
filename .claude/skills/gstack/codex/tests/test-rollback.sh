@@ -65,6 +65,7 @@ chmod +x "$TMP/stubs/codex"
 # markers) → review returns PASS. Good.
 
 export PATH="$TMP/stubs:$PATH"
+export CODEX_COMPANION="$THIS_DIR/codex-companion-fake.mjs"
 GSTACK_HOME="$TMP/.gstack"
 export GSTACK_HOME
 
