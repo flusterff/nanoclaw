@@ -111,7 +111,7 @@ Each layer has a defined purpose, cache behavior, and size budget. Composition o
 │     specific; one per principle)                                  │
 └───────────────────────────────────────────────────────────────────┘
 ┌── LAYER 2: CHARACTER (stable per-character, cached) ─────────────┐
-│  Purpose: The specific voice — 도담이 vs 불꽃이 vs 해나리 vs 바라미│
+│  Purpose: The specific voice — 퐁당이 vs 새싹이 vs 반짝이 vs 바라미│
 │  Cache: character-scoped (re-cached per character, not per turn)  │
 │  Size: ~600-900 tokens                                            │
 │                                                                   │
@@ -120,8 +120,8 @@ Each layer has a defined purpose, cache behavior, and size budget. Composition o
 │   - 6-10 few-shot dialogues showing:                              │
 │       - Range of response shapes (pair / menu / commit / open)    │
 │       - Voice register + signature phrases                        │
-│       - Content affinities (불꽃이 → fire-themed riddles, 바라미 → │
-│         wind/movement, 해나리 → sun/growth, 도담이 → general)     │
+│       - Content affinities (퐁당이 → 물/flow, 새싹이 → 뿌리/growth,│
+│         반짝이 → 빛/discovery, 바라미 → 바람/movement)            │
 │   - Forbidden patterns (aegyo, echo-menu, generic fallback)       │
 │   - Content-bank index pointers (list of available packs for this │
 │     character — Haiku selects from this list at runtime)          │
@@ -204,15 +204,15 @@ Gate check in orchestrator: if `<say>` doesn't match `<plan>` intent, treat as P
 Each of the 4 characters gets:
 
 1. **Distinct voice register** — tested via blind-listen test
-   - 도담이 (general-purpose): warm-neutral, balanced, slightly older-sibling energy. Default.
-   - 불꽃이 (fire element): energetic, more physical metaphors, "wow that's hot!", exclamations
-   - 해나리 (sun element): curious, sun/growth metaphors, patient, more questions back
-   - 바라미 (wind element): playful, movement metaphors, a bit more whimsical, shorter beats
+   - 퐁당이 (물 / water): fluid, reflective, adapts-to-shape energy; patient listener, ripple/flow metaphors
+   - 새싹이 (뿌리 / root): steady, patient, growth-minded "let's grow together"; deep/calm register; strongest at re-explaining (patience is the point)
+   - 반짝이 (빛 / light): bright, celebratory, "I see you!" energy; names the kid's aha-moments out loud; spark/sparkle metaphors
+   - 바라미 (바람 / wind): playful, breezy, movement metaphors, shorter beats, whimsy
 2. **Content affinities** — each character's bank biases toward their element
-   - 불꽃이's riddles lean physical/motion/energy themes
-   - 해나리's stories feature growth/discovery arcs
-   - 바라미's jokes are lighter/more pun-driven
-   - 도담이 has balanced mix
+   - 퐁당이's content leans water/flow/change themes + reflection-heavy stories
+   - 새싹이's stories feature growth/patience/seed-to-tree arcs; strongest re-explain angles
+   - 반짝이's content celebrates discovery/spark/aha-moments
+   - 바라미's jokes are lighter/breezier/movement-themed
 3. **Signature phrases (2-3 per character, used sparingly)** — create recognizability without becoming catchphrases
 4. **Consistent age-appropriate 반말** — with warmth particles; no aegyo
 
@@ -227,26 +227,26 @@ Each character = 6-10 few-shot dialogues. Total character-layer tokens per chara
 Directory structure:
 ```
 ~/Dodami/dodami-bargein-v1/content/
-├── dodami/
+├── pongdang/  (퐁당이 · 물)
 │   ├── riddles.md        # 20-30 riddles, age-tagged
 │   ├── jokes.md          # 15-25 jokes, age-tagged
 │   ├── stories.md        # 10-15 story seeds, age-tagged
 │   ├── mini-games.md     # 8-12 game patterns
 │   └── callbacks.md      # themed callbacks (intro, farewell, surprise)
-├── bulkki/  (불꽃이)
-├── haenari/ (해나리)
-└── barami/  (바라미)
+├── saessak/   (새싹이 · 뿌리)
+├── banjjak/   (반짝이 · 빛)
+└── barami/    (바라미 · 바람)
 ```
 
 **Format (example for a riddle entry):**
 ```markdown
-## R-불꽃이-07
+## R-퐁당이-07
 **age:** 8-10
 **difficulty:** medium
-**theme:** fire / energy
-**question:** 아주 뜨거운데 만지지도 못하고, 눈에는 보이는데 손으로 못 잡는 건 뭐게?
-**answer:** 불꽃 (or equivalents)
-**hints:** ["색깔은 빨강이나 주황이야", "나무를 태워서 만들어"]
+**theme:** 물 / flow
+**question:** 높은 데서는 시끄럽게 떨어지는데 낮은 데로 가면 조용해지는 건 뭘까?
+**answer:** 물 (폭포/계곡물 accepted)
+**hints:** ["바위 위에서도 흐르고 모래 위에서도 흘러", "네가 목마를 때 마시는 거야"]
 **delivery_notes:** "Start with a light 'ready?' beat. Give 15-20s think time before first hint."
 ```
 
@@ -277,7 +277,7 @@ Haiku's role:
 Session-scoped list, structured:
 ```json
 {
-  "used_content_ids": ["R-불꽃이-07", "J-도담이-03"],
+  "used_content_ids": ["R-퐁당이-07", "J-새싹이-03"],
   "recent_topics": ["불", "바다", "학교"],
   "recent_response_shapes": ["pair", "menu", "pair"],  // last 5
   "session_started_at": "2026-04-23T..."
@@ -366,6 +366,13 @@ Manual override flag: `DODAMI_OPUS_RATE` env var to tune (default 0.05, testable
 4. **Callback weaving prompt.** Instruction in Layer 1 to naturally reference facts in early turns.
 5. **Opus route for callback generation.** Higher-quality model for the "first 5 turns with callbacks" path.
 
+### Wave 5+ — Committed but deferred (post-Wave-4)
+
+These were deliberated during the 2026-04-23 review and confirmed as real commitments, not parked ideas. Sequenced after Wave 4 rather than woven into Waves 1-4 to keep scope tight.
+
+- **Wave 5 — Parent-facing session summaries** (F2 resolved). Wang et al. 2025 retention-lever feature: post-session summaries delivered to parents (opt-in). Generation + delivery mechanism + parent dashboard. Separate spec required. Primary monetization lever per `project_parent_willingness_to_pay.md`.
+- **Wave 5+ — Stream D multi-turn delivery system** (F3 resolved). Runtime sequencing of the `|||`-delimited beats (pacing, barge-in, filler integration). Designed to bolt on top of Stream C without re-prompting. See `2026-04-22-multi-turn-architecture-deferred.md`.
+
 ---
 
 ## Execution strategy
@@ -423,37 +430,35 @@ Manual override flag: `DODAMI_OPUS_RATE` env var to tune (default 0.05, testable
 
 ---
 
-## KEY DECISIONS FOR WILL (review before writing-plans)
+## KEY DECISIONS — RESOLVED (rev-2, 2026-04-23)
 
-Each of these is a taste call I made autonomously. Override any you want changed:
+All 10 decisions + 3 FORKs resolved by Will. Historical brainstorm trail preserved here for traceability.
 
-1. **`|||` as multi-turn delimiter.** Arbitrary choice — could be `␄` or any other sentinel. Chose `|||` for readability in logs and low collision risk with natural text.
+### KD defaults — accepted as-written
 
-2. **Opus at ~5% of turns** via specific trigger conditions. Could be higher (~10-15%) if you want more peaks; lower if cost-sensitive. Configurable via env.
+1. **`|||` multi-turn delimiter.** Accepted.
+2. **Opus ~5% of turns** via specific trigger conditions (first greeting, re-explain attempt 3, callback generation, session summaries). Env-tunable via `DODAMI_OPUS_RATE`. Accepted.
+3. **Content bank = markdown + frontmatter.** Accepted.
+5. **Blind-listen test threshold 3/4 correct.** Accepted.
+6. **Memory pruning: 30 days + 50 facts max per child.** Accepted.
+7. **Wave 4 callback shadow period: 1 week.** Accepted.
+8. **Rollout gates: 24h canary between steps.** Accepted.
+9. **Memory token ceiling: 2K injection.** Accepted.
+10. **Temperature 0.9 for variance.** Accepted.
 
-3. **Content bank format (markdown with frontmatter).** Chose markdown for git-diff readability + easy human curation. Could be YAML/JSON if preferred.
+### KD override
 
-4. **Character element themes** (불꽃이=fire, 해나리=sun, 바라미=wind, 도담이=general). I inferred from character names; if you want different themes, override.
+4. **Character element themes — OVERRIDDEN.** Elements are **물 / 뿌리 / 빛 / 바람** (water / root / light / wind). Characters mapped to:
+   - 퐁당이 → 물 (water)
+   - 새싹이 → 뿌리 (root) — renamed from 사랑이 to fit element theme (사랑이 had no thematic connection to 뿌리; 새싹 = sprout, the arc from root to growth)
+   - 반짝이 → 빛 (light)
+   - 바라미 → 바람 (wind)
 
-5. **Blind-listen test threshold: 3/4 correct.** Could be higher (4/4) or lower (2/4). 3/4 = clear character distinction without demanding 100% (avoids false-failure on edge cases).
+### FORKs resolved
 
-6. **Memory pruning policy** — low-salience facts pruned after N days. I left exact policy open. Probably 30 days with a max of 50 facts per child.
-
-7. **Wave 4 callback shadow period: 1 week.** Could be shorter (3 days) or longer (2 weeks).
-
-8. **Rollout gates 24h canary between steps.** Could be longer (48h) for higher confidence.
-
-9. **Token budget ceiling: ~2K memory injection.** Could be 1K (tighter) or 3K (looser). 2K is ~200-400 facts which is a lot for one kid.
-
-10. **Temperature 0.9 for variance.** Could be 0.8 (safer) or 1.0 (wilder). 0.9 balances.
-
-**FORK — your call** (compound taste decisions I refused to pre-resolve):
-
-**F1: Character names — stay with 4-element system or pivot?** Your memory `project_4element_characters.md` says "Names still in flux — ask before using in print." This design assumes they stay. If you're thinking of rebranding characters, flag it now so Wave 2 character work aligns.
-
-**F2: Parent-facing session summaries** — Wang et al. 2025 retention-lever research is a STRONG pull toward shipping this. But it's a whole feature (summary generation + delivery mechanism + parent opt-in). I left it out of Waves 1-4 to keep scope tight. Worth a Wave 5 or parallel track?
-
-**F3: Multi-turn delivery (Stream D) timing.** Current design emits `|||` delimiter but flattens at runtime until D ships. If you want "truly amazing" Dodami, D-ships-alongside-C is worth the extra scope. Otherwise current design lets D ship later without re-prompting.
+- **F1: Character names** — Confirmed **퐁당이 / 새싹이 / 반짝이 / 바라미** (with 사랑이 → 새싹이 rename per KD#4). Memory `project_4element_characters.md` to be updated to match. Names still "not finalized" at the brand level — this is the working set for Wave 2 implementation and is subject to future rebrand if it happens before public launch.
+- **F2: Parent-facing session summaries** — Deferred to **Wave 5**. Not parked — committed, separate spec required. See "Wave 5+" section.
+- **F3: Stream D multi-turn delivery** — Deferred to **Wave 5+**. `|||` delimiter ships with Stream C; runtime flattens until D lands.
 
 ---
 
@@ -480,3 +485,4 @@ Each of these is a taste call I made autonomously. Override any you want changed
 
 - **2026-04-22 (initial draft, paused after model-routing Q3 by user AFK):** brainstorming initiated, charter + A + B dispatched
 - **2026-04-23 (resumed + completed):** state audit performed (fixing three errors from prior turn), Q1-Q3 finalized, A+B research synthesized, spec written. Ready for writing-plans.
+- **2026-04-23 rev-2 (Will's review — KEY DECISIONS + FORKs resolved):** Characters locked as 퐁당이/새싹이/반짝이/바라미 with elements 물/뿌리/빛/바람 (사랑이 → 새싹이 rename to fit 뿌리 element). KD defaults 1-3, 5-10 accepted; KD#4 themes overridden. F2 (parent summaries) → Wave 5. F3 (Stream D) → Wave 5+. Spec sections updated: Layer 2 affinities, character differentiation, content bank directory, example riddle ID + theme, anti-repetition JSON example, Waves section (added Wave 5+). Ready for writing-plans on Wave 1.
