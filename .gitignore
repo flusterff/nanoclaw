@@ -18,9 +18,15 @@ groups/global/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
 
-# Secrets
+# Secrets — never commit real env or key material; .env.example is the template
 *.keys.json
 .env
+.env.*
+!.env.example
+
+# Certs / private keys
+*.pem
+*.key
 
 # Temp files
 .tmp-*
