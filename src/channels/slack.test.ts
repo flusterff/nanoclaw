@@ -917,6 +917,36 @@ describe('SlackChannel', () => {
       });
     });
 
+    it('chunks a queued message when prepended text exceeds the limit on flush', async () => {
+      // Body is just under the limit; prepend pushes it over.
+      // Queued during disconnect, must chunk on flush — not send as one
+      // oversized payload (Slack would 400 and abort the flush loop).
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+
+      const body = 'A'.repeat(3995); // 3995 + "<@U_PEER_999> " (14) = 4009
+      await channel.sendMessage('slack:C0123456789', body);
+
+      expect(currentApp().client.chat.postMessage).not.toHaveBeenCalled();
+
+      await channel.connect();
+
+      // 4009 / 4000 → 2 chunks
+      const calls = (
+        currentApp().client.chat.postMessage as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+      const flushChunks = calls.filter(
+        (c: any) => c[0].channel === 'C0123456789',
+      );
+      expect(flushChunks[0][0].text.length).toBe(4000);
+      expect(flushChunks[1][0].text.length).toBe(9);
+      // No single oversized chunk
+      for (const call of flushChunks) {
+        expect(call[0].text.length).toBeLessThanOrEqual(4000);
+      }
+    });
+
     it('tolerates whitespace and skips malformed tuples', async () => {
       withPeerMentions(' C_AAA : U_AAA , no-colon , : , C_BBB:U_BBB ');
       const channel = new SlackChannel(createTestOpts());

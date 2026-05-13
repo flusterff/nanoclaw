@@ -268,20 +268,7 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      // Slack limits messages to ~4000 characters; split if needed
-      if (finalText.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text: finalText,
-        });
-      } else {
-        for (let i = 0; i < finalText.length; i += MAX_MESSAGE_LENGTH) {
-          await this.app.client.chat.postMessage({
-            channel: channelId,
-            text: finalText.slice(i, i + MAX_MESSAGE_LENGTH),
-          });
-        }
-      }
+      await this.postChunked(channelId, finalText);
       logger.info({ jid, length: finalText.length }, 'Slack message sent');
     } catch (err) {
       this.outgoingQueue.push({ jid, text: finalText });
@@ -289,6 +276,26 @@ export class SlackChannel implements Channel {
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
+    }
+  }
+
+  /**
+   * Post text to Slack, splitting into `MAX_MESSAGE_LENGTH`-sized chunks when
+   * needed. Shared by `sendMessage` and `flushOutgoingQueue` so both paths
+   * respect the 4000-char limit — important because `enforcePeerMention` can
+   * push a near-limit message over by adding `<@USER_ID> ` (~15 chars), and
+   * queued items inherit the prepended form.
+   */
+  private async postChunked(channelId: string, text: string): Promise<void> {
+    if (text.length <= MAX_MESSAGE_LENGTH) {
+      await this.app.client.chat.postMessage({ channel: channelId, text });
+      return;
+    }
+    for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
+      await this.app.client.chat.postMessage({
+        channel: channelId,
+        text: text.slice(i, i + MAX_MESSAGE_LENGTH),
+      });
     }
   }
 
@@ -400,10 +407,7 @@ export class SlackChannel implements Channel {
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
         const channelId = item.jid.replace(/^slack:/, '');
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text: item.text,
-        });
+        await this.postChunked(channelId, item.text);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
