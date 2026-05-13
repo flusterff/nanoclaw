@@ -917,6 +917,47 @@ describe('SlackChannel', () => {
       });
     });
 
+    it('prepends when existing mention falls outside the first chunk', async () => {
+      // Mention buried in body would land in chunk 2 — first chunk would
+      // be sent without any peer mention, defeating the listener trigger.
+      // Guard must still prepend in this case.
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      const body = `${'A'.repeat(4500)} <@U_PEER_999>`;
+      await channel.sendMessage('slack:C0123456789', body);
+
+      const calls = (
+        currentApp().client.chat.postMessage as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+      // First chunk must carry an auto-prepended mention at the head
+      expect(calls[0][0].text.startsWith('<@U_PEER_999> ')).toBe(true);
+      expect(calls[0][0].text.length).toBe(4000);
+    });
+
+    it('does not prepend when existing mention straddles the chunk boundary', async () => {
+      // Mention starts at position 3995, ends at 4008 — split across
+      // chunks 1 and 2. First chunk has incomplete `<@U_PEER_99` token,
+      // which Slack won't recognize. Guard must prepend anyway.
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      // Build text so the mention starts at index 3995 (13 chars left of
+      // 4000), causing it to straddle 3995..4008
+      const prefix = 'A'.repeat(3995);
+      const body = `${prefix}<@U_PEER_999> trailing content`;
+      await channel.sendMessage('slack:C0123456789', body);
+
+      const calls = (
+        currentApp().client.chat.postMessage as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      // First chunk must contain a COMPLETE mention at the head
+      expect(calls[0][0].text.startsWith('<@U_PEER_999> ')).toBe(true);
+    });
+
     it('chunks a queued message when prepended text exceeds the limit on flush', async () => {
       // Body is just under the limit; prepend pushes it over.
       // Queued during disconnect, must chunk on flush — not send as one

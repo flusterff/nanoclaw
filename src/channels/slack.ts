@@ -316,7 +316,15 @@ export class SlackChannel implements Channel {
     if (!peerUserId) return text;
 
     const mention = `<@${peerUserId}>`;
-    if (text.includes(mention)) return text;
+    // De-dupe only when the mention will FULLY land in the first chunk
+    // Slack emits. For long messages (>MAX_MESSAGE_LENGTH), a mention
+    // buried later in the body would otherwise let us skip prepending,
+    // and the first chunk would go out without any mention — defeating
+    // the whole guarantee. `text.slice(0, MAX_MESSAGE_LENGTH).includes`
+    // returns true iff the full token fits in chars 0..MAX-1, so a
+    // mention straddling the chunk boundary is treated as missing.
+    const firstChunk = text.slice(0, MAX_MESSAGE_LENGTH);
+    if (firstChunk.includes(mention)) return text;
 
     logger.info(
       { channelId, peerUserId, originalLength: text.length },
