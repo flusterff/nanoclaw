@@ -917,10 +917,12 @@ describe('SlackChannel', () => {
       });
     });
 
-    it('prepends when existing mention falls outside the first chunk', async () => {
+    it('prepends when existing mention falls outside the first chunk and neutralizes the body copy', async () => {
       // Mention buried in body would land in chunk 2 — first chunk would
       // be sent without any peer mention, defeating the listener trigger.
-      // Guard must still prepend in this case.
+      // Guard must (a) prepend on chunk 1, (b) replace the body's
+      // bracketed `<@PEER>` with plain `@PEER` so chunk 2 does NOT
+      // re-trigger the peer listener (double-fire).
       withPeerMentions('C0123456789:U_PEER_999');
       const channel = new SlackChannel(createTestOpts());
       await channel.connect();
@@ -932,9 +934,40 @@ describe('SlackChannel', () => {
         currentApp().client.chat.postMessage as ReturnType<typeof vi.fn>
       ).mock.calls;
       expect(calls.length).toBeGreaterThanOrEqual(2);
-      // First chunk must carry an auto-prepended mention at the head
+      // First chunk: auto-prepended mention at head
       expect(calls[0][0].text.startsWith('<@U_PEER_999> ')).toBe(true);
       expect(calls[0][0].text.length).toBe(4000);
+      // No subsequent chunk may contain the bracketed (trigger) form
+      for (let i = 1; i < calls.length; i++) {
+        expect(calls[i][0].text.includes('<@U_PEER_999>')).toBe(false);
+      }
+      // The original body mention should appear in plain form somewhere
+      // in the joined output so the reference isn't lost.
+      const joined = calls.map((c: any) => c[0].text).join('');
+      expect(joined.includes('@U_PEER_999')).toBe(true);
+    });
+
+    it('neutralizes body mentions even when first chunk already has one', async () => {
+      // Long message where the agent put the mention BOTH at the head
+      // (chunk 1) and quoted it later (chunk 2). Without neutralization
+      // the peer's listener fires twice on the same logical message.
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      const body = `<@U_PEER_999> ${'A'.repeat(4500)} quoting <@U_PEER_999> here`;
+      await channel.sendMessage('slack:C0123456789', body);
+
+      const calls = (
+        currentApp().client.chat.postMessage as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+      // Chunk 1: original mention preserved
+      expect(calls[0][0].text.includes('<@U_PEER_999>')).toBe(true);
+      // Chunk 2+: no bracketed form
+      for (let i = 1; i < calls.length; i++) {
+        expect(calls[i][0].text.includes('<@U_PEER_999>')).toBe(false);
+      }
     });
 
     it('does not prepend when existing mention straddles the chunk boundary', async () => {

@@ -316,21 +316,48 @@ export class SlackChannel implements Channel {
     if (!peerUserId) return text;
 
     const mention = `<@${peerUserId}>`;
-    // De-dupe only when the mention will FULLY land in the first chunk
-    // Slack emits. For long messages (>MAX_MESSAGE_LENGTH), a mention
-    // buried later in the body would otherwise let us skip prepending,
-    // and the first chunk would go out without any mention — defeating
-    // the whole guarantee. `text.slice(0, MAX_MESSAGE_LENGTH).includes`
-    // returns true iff the full token fits in chars 0..MAX-1, so a
-    // mention straddling the chunk boundary is treated as missing.
-    const firstChunk = text.slice(0, MAX_MESSAGE_LENGTH);
-    if (firstChunk.includes(mention)) return text;
+    const plainForm = `@${peerUserId}`;
 
-    logger.info(
-      { channelId, peerUserId, originalLength: text.length },
-      'Auto-prepended peer mention on outbound Slack message',
-    );
-    return `${mention} ${text}`;
+    // Step 1: guarantee the first emitted chunk carries a mention.
+    // `slice(0, MAX_MESSAGE_LENGTH).includes(mention)` returns true iff
+    // the FULL token fits within chars 0..MAX-1, so a mention straddling
+    // the chunk boundary is correctly treated as missing.
+    const firstChunkHasMention = text
+      .slice(0, MAX_MESSAGE_LENGTH)
+      .includes(mention);
+    let result = firstChunkHasMention ? text : `${mention} ${text}`;
+
+    // Step 2: guarantee ONLY the first chunk fires the peer listener.
+    // If the result extends past MAX_MESSAGE_LENGTH, replace any
+    // `<@PEER>` occurrences in chunks 2+ with the bracket-less plain
+    // form `@PEER`, which renders as text and does not trigger Slack's
+    // mention detection. Without this, a later chunk containing the
+    // mention would re-fire the peer's listener on the same logical
+    // message — causing double-processing on the peer side.
+    if (result.length > MAX_MESSAGE_LENGTH) {
+      const head = result.slice(0, MAX_MESSAGE_LENGTH);
+      const tail = result
+        .slice(MAX_MESSAGE_LENGTH)
+        .split(mention)
+        .join(plainForm);
+      result = head + tail;
+    }
+
+    if (result !== text) {
+      logger.info(
+        {
+          channelId,
+          peerUserId,
+          originalLength: text.length,
+          finalLength: result.length,
+          prepended: !firstChunkHasMention,
+          tailNeutralized:
+            result.length > MAX_MESSAGE_LENGTH && text.includes(mention),
+        },
+        'Auto-prepended peer mention on outbound Slack message',
+      );
+    }
+    return result;
   }
 
   isConnected(): boolean {
