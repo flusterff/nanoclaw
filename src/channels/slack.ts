@@ -17,6 +17,46 @@ import {
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
 
+/**
+ * Parse `SLACK_PEER_MENTIONS` into a per-channel peer user-ID map.
+ *
+ * Format: comma-separated `channelId:peerUserId` tuples. Whitespace around
+ * tuples and each side of the colon is tolerated. Malformed tuples are
+ * skipped with a warning rather than aborting startup.
+ *
+ * Example: `SLACK_PEER_MENTIONS=C0B3EPK1XCL:U0B3B7CCEQJ,C99999:U88888`
+ */
+function parsePeerMentions(raw: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!raw) return map;
+
+  for (const tuple of raw.split(',')) {
+    const trimmed = tuple.trim();
+    if (!trimmed) continue;
+
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx === -1) {
+      logger.warn(
+        { tuple: trimmed },
+        'SLACK_PEER_MENTIONS tuple missing colon',
+      );
+      continue;
+    }
+    const channelId = trimmed.slice(0, colonIdx).trim();
+    const peerUserId = trimmed.slice(colonIdx + 1).trim();
+    if (!channelId || !peerUserId) {
+      logger.warn(
+        { tuple: trimmed },
+        'SLACK_PEER_MENTIONS tuple has empty channel or peer',
+      );
+      continue;
+    }
+    map.set(channelId, peerUserId);
+  }
+
+  return map;
+}
+
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
 // (BotMessageEvent, subtype 'bot_message') so we can track our own output.
@@ -40,6 +80,7 @@ export class SlackChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
+  private channelPeers: Map<string, string>;
 
   private opts: SlackChannelOpts;
 
@@ -48,9 +89,14 @@ export class SlackChannel implements Channel {
 
     // Read tokens from .env (not process.env — keeps secrets off the environment
     // so they don't leak to child processes, matching NanoClaw's security pattern)
-    const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+    const env = readEnvFile([
+      'SLACK_BOT_TOKEN',
+      'SLACK_APP_TOKEN',
+      'SLACK_PEER_MENTIONS',
+    ]);
     const botToken = env.SLACK_BOT_TOKEN;
     const appToken = env.SLACK_APP_TOKEN;
+    this.channelPeers = parsePeerMentions(env.SLACK_PEER_MENTIONS);
 
     if (!botToken || !appToken) {
       throw new Error(
@@ -210,9 +256,10 @@ export class SlackChannel implements Channel {
 
   async sendMessage(jid: string, text: string): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
+    const finalText = this.enforcePeerMention(channelId, text);
 
     if (!this.connected) {
-      this.outgoingQueue.push({ jid, text });
+      this.outgoingQueue.push({ jid, text: finalText });
       logger.info(
         { jid, queueSize: this.outgoingQueue.length },
         'Slack disconnected, message queued',
@@ -221,25 +268,96 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      // Slack limits messages to ~4000 characters; split if needed
-      if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text });
-      } else {
-        for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
-          await this.app.client.chat.postMessage({
-            channel: channelId,
-            text: text.slice(i, i + MAX_MESSAGE_LENGTH),
-          });
-        }
-      }
-      logger.info({ jid, length: text.length }, 'Slack message sent');
+      await this.postChunked(channelId, finalText);
+      logger.info({ jid, length: finalText.length }, 'Slack message sent');
     } catch (err) {
-      this.outgoingQueue.push({ jid, text });
+      this.outgoingQueue.push({ jid, text: finalText });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
     }
+  }
+
+  /**
+   * Post text to Slack, splitting into `MAX_MESSAGE_LENGTH`-sized chunks when
+   * needed. Shared by `sendMessage` and `flushOutgoingQueue` so both paths
+   * respect the 4000-char limit — important because `enforcePeerMention` can
+   * push a near-limit message over by adding `<@USER_ID> ` (~15 chars), and
+   * queued items inherit the prepended form.
+   */
+  private async postChunked(channelId: string, text: string): Promise<void> {
+    if (text.length <= MAX_MESSAGE_LENGTH) {
+      await this.app.client.chat.postMessage({ channel: channelId, text });
+      return;
+    }
+    for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
+      await this.app.client.chat.postMessage({
+        channel: channelId,
+        text: text.slice(i, i + MAX_MESSAGE_LENGTH),
+      });
+    }
+  }
+
+  /**
+   * Guarantee a peer `<@USER_ID>` mention on outbound messages to AI-to-AI
+   * channels configured via `SLACK_PEER_MENTIONS`. If the channel has a
+   * configured peer and the outgoing text lacks that user's encoded mention,
+   * prepend it.
+   *
+   * Why this exists: persona-level instructions to always mention the peer
+   * proved unreliable — the agent rationalized short replies, verdicts, and
+   * standby messages as "terminal" and dropped the mention, causing the
+   * peer AI's listener to never fire and the AI-to-AI loop to stall
+   * silently. This guard removes that failure mode at the transport layer.
+   */
+  private enforcePeerMention(channelId: string, text: string): string {
+    const peerUserId = this.channelPeers.get(channelId);
+    if (!peerUserId) return text;
+
+    const mention = `<@${peerUserId}>`;
+    const plainForm = `@${peerUserId}`;
+
+    // Step 1: guarantee the first emitted chunk carries a mention.
+    // `slice(0, MAX_MESSAGE_LENGTH).includes(mention)` returns true iff
+    // the FULL token fits within chars 0..MAX-1, so a mention straddling
+    // the chunk boundary is correctly treated as missing.
+    const firstChunkHasMention = text
+      .slice(0, MAX_MESSAGE_LENGTH)
+      .includes(mention);
+    let result = firstChunkHasMention ? text : `${mention} ${text}`;
+
+    // Step 2: guarantee ONLY the first chunk fires the peer listener.
+    // If the result extends past MAX_MESSAGE_LENGTH, replace any
+    // `<@PEER>` occurrences in chunks 2+ with the bracket-less plain
+    // form `@PEER`, which renders as text and does not trigger Slack's
+    // mention detection. Without this, a later chunk containing the
+    // mention would re-fire the peer's listener on the same logical
+    // message — causing double-processing on the peer side.
+    if (result.length > MAX_MESSAGE_LENGTH) {
+      const head = result.slice(0, MAX_MESSAGE_LENGTH);
+      const tail = result
+        .slice(MAX_MESSAGE_LENGTH)
+        .split(mention)
+        .join(plainForm);
+      result = head + tail;
+    }
+
+    if (result !== text) {
+      logger.info(
+        {
+          channelId,
+          peerUserId,
+          originalLength: text.length,
+          finalLength: result.length,
+          prepended: !firstChunkHasMention,
+          tailNeutralized:
+            result.length > MAX_MESSAGE_LENGTH && text.includes(mention),
+        },
+        'Auto-prepended peer mention on outbound Slack message',
+      );
+    }
+    return result;
   }
 
   isConnected(): boolean {
@@ -324,10 +442,7 @@ export class SlackChannel implements Channel {
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
         const channelId = item.jid.replace(/^slack:/, '');
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text: item.text,
-        });
+        await this.postChunked(channelId, item.text);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
