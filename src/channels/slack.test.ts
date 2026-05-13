@@ -134,7 +134,9 @@ function currentApp() {
   return appRef.current;
 }
 
-async function triggerMessageEvent(event: ReturnType<typeof createMessageEvent>) {
+async function triggerMessageEvent(
+  event: ReturnType<typeof createMessageEvent>,
+) {
   const handler = currentApp().eventHandlers.get('message');
   if (handler) await handler({ event });
 }
@@ -313,7 +315,10 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      const event = createMessageEvent({ user: 'U_BOT_123', text: 'Self message' });
+      const event = createMessageEvent({
+        user: 'U_BOT_123',
+        text: 'Self message',
+      });
       await triggerMessageEvent(event);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -404,13 +409,17 @@ describe('SlackChannel', () => {
       }).length;
 
       // First message — API call
-      await triggerMessageEvent(createMessageEvent({ user: 'U_USER_456', text: 'First' }));
+      await triggerMessageEvent(
+        createMessageEvent({ user: 'U_USER_456', text: 'First' }),
+      );
       // Second message — should use cache
-      await triggerMessageEvent(createMessageEvent({
-        user: 'U_USER_456',
-        text: 'Second',
-        ts: '1704067201.000000',
-      }));
+      await triggerMessageEvent(
+        createMessageEvent({
+          user: 'U_USER_456',
+          text: 'Second',
+          ts: '1704067201.000000',
+        }),
+      );
 
       const callsForUserAtEnd = (
         currentApp().client.users.info as ReturnType<typeof vi.fn>
@@ -427,7 +436,9 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      currentApp().client.users.info.mockRejectedValueOnce(new Error('API error'));
+      currentApp().client.users.info.mockRejectedValueOnce(
+        new Error('API error'),
+      );
 
       const event = createMessageEvent({ user: 'U_UNKNOWN', text: 'Hi' });
       await triggerMessageEvent(event);
@@ -776,6 +787,155 @@ describe('SlackChannel', () => {
     });
   });
 
+  // --- Peer mention auto-prepend (SLACK_PEER_MENTIONS) ---
+
+  describe('peer mention auto-prepend', () => {
+    function withPeerMentions(value: string) {
+      vi.mocked(readEnvFile).mockReturnValueOnce({
+        SLACK_BOT_TOKEN: 'xoxb-test-token',
+        SLACK_APP_TOKEN: 'xapp-test-token',
+        SLACK_PEER_MENTIONS: value,
+      });
+    }
+
+    it('prepends peer mention when channel is configured and text lacks it', async () => {
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.sendMessage('slack:C0123456789', 'Standby.');
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: '<@U_PEER_999> Standby.',
+      });
+    });
+
+    it('does not double-prepend when mention is already present anywhere in text', async () => {
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.sendMessage(
+        'slack:C0123456789',
+        'Per <@U_PEER_999> request — proceeding.',
+      );
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'Per <@U_PEER_999> request — proceeding.',
+      });
+    });
+
+    it('leaves text untouched when channel has no configured peer', async () => {
+      withPeerMentions('C9999999999:U_OTHER_888');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.sendMessage('slack:C0123456789', 'Hello');
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'Hello',
+      });
+    });
+
+    it('leaves text untouched when SLACK_PEER_MENTIONS is unset', async () => {
+      // Default mock has no SLACK_PEER_MENTIONS
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.sendMessage('slack:C0123456789', 'Standby.');
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'Standby.',
+      });
+    });
+
+    it('applies the prepend to queued messages when disconnected', async () => {
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+
+      // Queue while disconnected
+      await channel.sendMessage('slack:C0123456789', 'Standby.');
+
+      expect(currentApp().client.chat.postMessage).not.toHaveBeenCalled();
+
+      // Connect drains the queue with the prepended text
+      await channel.connect();
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: '<@U_PEER_999> Standby.',
+      });
+    });
+
+    it('only prepends mention on first chunk when splitting long messages', async () => {
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      // Body 4000 chars; prepend "<@U_PEER_999> " = 14 chars → 4014 total
+      // Splits into 4000 + 14
+      const body = 'A'.repeat(4000);
+      await channel.sendMessage('slack:C0123456789', body);
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
+      const firstCall = (
+        currentApp().client.chat.postMessage as ReturnType<typeof vi.fn>
+      ).mock.calls[0][0];
+      const secondCall = (
+        currentApp().client.chat.postMessage as ReturnType<typeof vi.fn>
+      ).mock.calls[1][0];
+
+      expect(firstCall.text.startsWith('<@U_PEER_999> ')).toBe(true);
+      expect(firstCall.text.length).toBe(4000);
+      expect(secondCall.text.includes('<@U_PEER_999>')).toBe(false);
+    });
+
+    it('supports multiple channel:peer tuples comma-separated', async () => {
+      withPeerMentions('C_AAA:U_AAA,C_BBB:U_BBB');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.sendMessage('slack:C_AAA', 'to A');
+      await channel.sendMessage('slack:C_BBB', 'to B');
+      await channel.sendMessage('slack:C_CCC', 'to unconfigured C');
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C_AAA',
+        text: '<@U_AAA> to A',
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C_BBB',
+        text: '<@U_BBB> to B',
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C_CCC',
+        text: 'to unconfigured C',
+      });
+    });
+
+    it('tolerates whitespace and skips malformed tuples', async () => {
+      withPeerMentions(' C_AAA : U_AAA , no-colon , : , C_BBB:U_BBB ');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.sendMessage('slack:C_AAA', 'a');
+      await channel.sendMessage('slack:C_BBB', 'b');
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C_AAA',
+        text: '<@U_AAA> a',
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C_BBB',
+        text: '<@U_BBB> b',
+      });
+    });
+  });
+
   // --- ownsJid ---
 
   describe('ownsJid', () => {
@@ -905,17 +1065,13 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(opts);
 
       // First page returns a cursor; second page returns no cursor
-      currentApp().client.conversations.list
-        .mockResolvedValueOnce({
-          channels: [
-            { id: 'C001', name: 'general', is_member: true },
-          ],
+      currentApp()
+        .client.conversations.list.mockResolvedValueOnce({
+          channels: [{ id: 'C001', name: 'general', is_member: true }],
           response_metadata: { next_cursor: 'cursor_page2' },
         })
         .mockResolvedValueOnce({
-          channels: [
-            { id: 'C002', name: 'random', is_member: true },
-          ],
+          channels: [{ id: 'C002', name: 'random', is_member: true }],
           response_metadata: {},
         });
 
@@ -923,7 +1079,8 @@ describe('SlackChannel', () => {
 
       // Should have called conversations.list twice (once per page)
       expect(currentApp().client.conversations.list).toHaveBeenCalledTimes(2);
-      expect(currentApp().client.conversations.list).toHaveBeenNthCalledWith(2,
+      expect(currentApp().client.conversations.list).toHaveBeenNthCalledWith(
+        2,
         expect.objectContaining({ cursor: 'cursor_page2' }),
       );
 
