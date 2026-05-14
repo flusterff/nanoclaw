@@ -93,6 +93,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     target_group_jid: z.string().optional().describe('(Main group only) JID of the group to schedule the task for. Defaults to the current group.'),
   },
   async (args) => {
+    // Host src/schedule-policy.ts is canonical; this is a UX-level pre-write guard.
     // Validate schedule_value before writing IPC
     if (args.schedule_type === 'cron') {
       try {
@@ -257,6 +258,7 @@ server.tool(
     schedule_value: z.string().optional().describe('New schedule value (see schedule_task for format)'),
   },
   async (args) => {
+    // Host src/schedule-policy.ts is canonical; this is a UX-level pre-write guard.
     // Validate schedule_value if provided
     if (args.schedule_type === 'cron' || (!args.schedule_type && args.schedule_value)) {
       if (args.schedule_value) {
