@@ -30,8 +30,14 @@ interface SlackEventLogEntry {
 
 interface OutgoingQueueItem {
   jid: string;
-  text: string;
+  chunks: string[];
   retryAttempt: number;
+}
+
+interface ChunkedPostFailure {
+  err: unknown;
+  remainingChunks: string[];
+  retryAfterMs: number | undefined;
 }
 
 function formatSlackEventLogLine(entry: SlackEventLogEntry): string {
@@ -345,9 +351,10 @@ export class SlackChannel implements Channel {
   async sendMessage(jid: string, text: string): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     const finalText = this.enforcePeerMention(channelId, text);
+    const chunks = this.splitMessage(finalText);
 
     if (!this.connected || this.outgoingQueue.length > 0 || this.flushing) {
-      this.enqueueOutgoing(jid, finalText);
+      this.enqueueOutgoing(jid, chunks);
       logger.info(
         { jid, queueSize: this.outgoingQueue.length },
         this.connected
@@ -359,35 +366,51 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      await this.postChunked(channelId, finalText);
+      await this.postChunks(channelId, chunks);
       logger.info({ jid, length: finalText.length }, 'Slack message sent');
     } catch (err) {
-      const item = this.enqueueOutgoing(jid, finalText);
+      const failure = err as ChunkedPostFailure;
+      const item = this.enqueueOutgoing(jid, failure.remainingChunks);
       logger.warn(
-        { jid, err, queueSize: this.outgoingQueue.length },
+        { jid, err: failure.err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
-      this.scheduleOutgoingQueueFlush(retryAfterMsFromError(err), item);
+      this.scheduleOutgoingQueueFlush(failure.retryAfterMs, item);
     }
   }
 
   /**
-   * Post text to Slack, splitting into `MAX_MESSAGE_LENGTH`-sized chunks when
-   * needed. Shared by `sendMessage` and `flushOutgoingQueue` so both paths
-   * respect the 4000-char limit — important because `enforcePeerMention` can
-   * push a near-limit message over by adding `<@USER_ID> ` (~15 chars), and
-   * queued items inherit the prepended form.
+   * Split before posting so retry queue entries can keep only unsent chunks.
    */
-  private async postChunked(channelId: string, text: string): Promise<void> {
+  private splitMessage(text: string): string[] {
     if (text.length <= MAX_MESSAGE_LENGTH) {
-      await this.app.client.chat.postMessage({ channel: channelId, text });
-      return;
+      return [text];
     }
+    const chunks: string[] = [];
     for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
-      await this.app.client.chat.postMessage({
-        channel: channelId,
-        text: text.slice(i, i + MAX_MESSAGE_LENGTH),
-      });
+      chunks.push(text.slice(i, i + MAX_MESSAGE_LENGTH));
+    }
+    return chunks;
+  }
+
+  /**
+   * Post pre-split chunks sequentially. On failure, throws the unsent suffix so
+   * queue retries do not duplicate chunks Slack already accepted.
+   */
+  private async postChunks(channelId: string, chunks: string[]): Promise<void> {
+    for (let i = 0; i < chunks.length; i++) {
+      try {
+        await this.app.client.chat.postMessage({
+          channel: channelId,
+          text: chunks[i],
+        });
+      } catch (err) {
+        throw {
+          err,
+          remainingChunks: chunks.slice(i),
+          retryAfterMs: retryAfterMsFromError(err),
+        } satisfies ChunkedPostFailure;
+      }
     }
   }
 
@@ -568,19 +591,25 @@ export class SlackChannel implements Channel {
         const item = this.outgoingQueue[0];
         const channelId = item.jid.replace(/^slack:/, '');
         try {
-          await this.postChunked(channelId, item.text);
+          await this.postChunks(channelId, item.chunks);
         } catch (err) {
+          const failure = err as ChunkedPostFailure;
+          item.chunks = failure.remainingChunks;
           logger.warn(
-            { jid: item.jid, err, queueSize: this.outgoingQueue.length },
+            {
+              jid: item.jid,
+              err: failure.err,
+              queueSize: this.outgoingQueue.length,
+            },
             'Failed to flush queued Slack message, will retry',
           );
-          this.scheduleOutgoingQueueFlush(retryAfterMsFromError(err), item);
+          this.scheduleOutgoingQueueFlush(failure.retryAfterMs, item);
           return;
         }
 
         this.outgoingQueue.shift();
         logger.info(
-          { jid: item.jid, length: item.text.length },
+          { jid: item.jid, length: item.chunks.join('').length },
           'Queued Slack message sent',
         );
       }
@@ -589,8 +618,8 @@ export class SlackChannel implements Channel {
     }
   }
 
-  private enqueueOutgoing(jid: string, text: string): OutgoingQueueItem {
-    const item = { jid, text, retryAttempt: 0 };
+  private enqueueOutgoing(jid: string, chunks: string[]): OutgoingQueueItem {
+    const item = { jid, chunks, retryAttempt: 0 };
     this.outgoingQueue.push(item);
     return item;
   }
