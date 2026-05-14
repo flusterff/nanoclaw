@@ -17,6 +17,8 @@ import {
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
+const OUTGOING_QUEUE_RETRY_BASE_MS = 1000;
+const OUTGOING_QUEUE_RETRY_MAX_MS = 30000;
 
 interface SlackEventLogEntry {
   eventTs: string;
@@ -24,6 +26,12 @@ interface SlackEventLogEntry {
   userId: string;
   threadTs: string;
   text: string;
+}
+
+interface OutgoingQueueItem {
+  jid: string;
+  text: string;
+  retryAttempt: number;
 }
 
 function formatSlackEventLogLine(entry: SlackEventLogEntry): string {
@@ -40,6 +48,48 @@ function formatSlackEventLogLine(entry: SlackEventLogEntry): string {
   ]
     .join('\t')
     .concat('\n');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function readHeader(headers: unknown, name: string): unknown {
+  if (!isRecord(headers)) return undefined;
+
+  const maybeGet = headers.get;
+  if (typeof maybeGet === 'function') {
+    return (
+      maybeGet.call(headers, name) ?? maybeGet.call(headers, name.toLowerCase())
+    );
+  }
+
+  return headers[name] ?? headers[name.toLowerCase()];
+}
+
+function retryAfterMsFromError(err: unknown): number | undefined {
+  if (!isRecord(err)) return undefined;
+
+  const data = isRecord(err.data) ? err.data : undefined;
+  const response = isRecord(err.response) ? err.response : undefined;
+  const value =
+    err.retryAfter ??
+    err.retry_after ??
+    data?.retry_after ??
+    readHeader(err.headers, 'Retry-After') ??
+    readHeader(response?.headers, 'Retry-After');
+
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return value * 1000;
+  }
+  if (typeof value !== 'string') return undefined;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+
+  const retryAt = Date.parse(value);
+  if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+  return undefined;
 }
 
 /**
@@ -102,8 +152,9 @@ export class SlackChannel implements Channel {
   private botDisplayName: string | undefined;
   private botId: string | undefined;
   private connected = false;
-  private outgoingQueue: Array<{ jid: string; text: string }> = [];
+  private outgoingQueue: OutgoingQueueItem[] = [];
   private flushing = false;
+  private queueRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private userNameCache = new Map<string, string>();
   private channelPeers: Map<string, string>;
   private eventLogPath: string | undefined;
@@ -295,12 +346,15 @@ export class SlackChannel implements Channel {
     const channelId = jid.replace(/^slack:/, '');
     const finalText = this.enforcePeerMention(channelId, text);
 
-    if (!this.connected) {
-      this.outgoingQueue.push({ jid, text: finalText });
+    if (!this.connected || this.outgoingQueue.length > 0 || this.flushing) {
+      this.enqueueOutgoing(jid, finalText);
       logger.info(
         { jid, queueSize: this.outgoingQueue.length },
-        'Slack disconnected, message queued',
+        this.connected
+          ? 'Slack outgoing queue has pending items, message queued'
+          : 'Slack disconnected, message queued',
       );
+      this.scheduleOutgoingQueueFlush();
       return;
     }
 
@@ -308,11 +362,12 @@ export class SlackChannel implements Channel {
       await this.postChunked(channelId, finalText);
       logger.info({ jid, length: finalText.length }, 'Slack message sent');
     } catch (err) {
-      this.outgoingQueue.push({ jid, text: finalText });
+      const item = this.enqueueOutgoing(jid, finalText);
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
+      this.scheduleOutgoingQueueFlush(retryAfterMsFromError(err), item);
     }
   }
 
@@ -407,6 +462,10 @@ export class SlackChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    if (this.queueRetryTimer) {
+      clearTimeout(this.queueRetryTimer);
+      this.queueRetryTimer = undefined;
+    }
     await this.app.stop();
   }
 
@@ -495,7 +554,10 @@ export class SlackChannel implements Channel {
   }
 
   private async flushOutgoingQueue(): Promise<void> {
-    if (this.flushing || this.outgoingQueue.length === 0) return;
+    if (!this.connected || this.flushing || this.outgoingQueue.length === 0) {
+      return;
+    }
+
     this.flushing = true;
     try {
       logger.info(
@@ -503,9 +565,20 @@ export class SlackChannel implements Channel {
         'Flushing Slack outgoing queue',
       );
       while (this.outgoingQueue.length > 0) {
-        const item = this.outgoingQueue.shift()!;
+        const item = this.outgoingQueue[0];
         const channelId = item.jid.replace(/^slack:/, '');
-        await this.postChunked(channelId, item.text);
+        try {
+          await this.postChunked(channelId, item.text);
+        } catch (err) {
+          logger.warn(
+            { jid: item.jid, err, queueSize: this.outgoingQueue.length },
+            'Failed to flush queued Slack message, will retry',
+          );
+          this.scheduleOutgoingQueueFlush(retryAfterMsFromError(err), item);
+          return;
+        }
+
+        this.outgoingQueue.shift();
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
@@ -513,6 +586,49 @@ export class SlackChannel implements Channel {
       }
     } finally {
       this.flushing = false;
+    }
+  }
+
+  private enqueueOutgoing(jid: string, text: string): OutgoingQueueItem {
+    const item = { jid, text, retryAttempt: 0 };
+    this.outgoingQueue.push(item);
+    return item;
+  }
+
+  private retryDelayMs(retryAttempt: number): number {
+    return Math.min(
+      OUTGOING_QUEUE_RETRY_BASE_MS * 2 ** retryAttempt,
+      OUTGOING_QUEUE_RETRY_MAX_MS,
+    );
+  }
+
+  private scheduleOutgoingQueueFlush(
+    retryAfterMs?: number,
+    item?: OutgoingQueueItem,
+  ): void {
+    if (
+      !this.connected ||
+      this.outgoingQueue.length === 0 ||
+      this.queueRetryTimer
+    ) {
+      return;
+    }
+
+    const delayMs =
+      retryAfterMs ?? this.retryDelayMs(item ? item.retryAttempt : 0);
+    if (item) item.retryAttempt += 1;
+
+    this.queueRetryTimer = setTimeout(() => {
+      this.queueRetryTimer = undefined;
+      void this.flushOutgoingQueue();
+    }, delayMs);
+
+    if (
+      typeof this.queueRetryTimer === 'object' &&
+      this.queueRetryTimer &&
+      'unref' in this.queueRetryTimer
+    ) {
+      this.queueRetryTimer.unref();
     }
   }
 }
