@@ -90,7 +90,11 @@ export type RecurringNextRunDecision =
   | {
       ok: true;
       nextRun: string | null;
-      reason: 'once_task' | 'cron_next_run' | 'interval_next_run';
+      reason:
+        | 'once_task'
+        | 'cron_next_run'
+        | 'interval_next_run'
+        | 'unknown_schedule_type';
     }
   | {
       ok: false;
@@ -318,23 +322,30 @@ export function computeRecurringNextRun(
     }
   }
 
-  const ms = parseInt(task.schedule_value, 10);
-  if (!ms || ms <= 0) {
+  if (task.schedule_type === 'interval') {
+    const ms = parseInt(task.schedule_value, 10);
+    if (!ms || ms <= 0) {
+      return {
+        ok: false,
+        reason: 'invalid_interval',
+        fallbackNextRun: new Date(now + 60_000).toISOString(),
+      };
+    }
+
+    let next = new Date(task.next_run!).getTime() + ms;
+    while (next <= now) {
+      next += ms;
+    }
+
     return {
-      ok: false,
-      reason: 'invalid_interval',
-      fallbackNextRun: new Date(now + 60_000).toISOString(),
+      ok: true,
+      nextRun: new Date(next).toISOString(),
+      reason: 'interval_next_run',
     };
   }
 
-  let next = new Date(task.next_run!).getTime() + ms;
-  while (next <= now) {
-    next += ms;
-  }
-
-  return {
-    ok: true,
-    nextRun: new Date(next).toISOString(),
-    reason: 'interval_next_run',
-  };
+  // Unknown schedule_type (e.g., legacy/corrupt DB row): match the previous
+  // `return null` fallthrough in computeNextRun so the task completes after its
+  // due run instead of being parseInt-coerced into an interval reschedule.
+  return { ok: true, nextRun: null, reason: 'unknown_schedule_type' };
 }

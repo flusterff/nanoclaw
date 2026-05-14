@@ -290,4 +290,25 @@ describe('computeRecurringNextRun', () => {
       fallbackNextRun: '2026-01-01T00:01:00.000Z',
     });
   });
+
+  it('returns null nextRun for unknown schedule_type so legacy/corrupt rows complete cleanly', () => {
+    // Regression guard: previously a row with schedule_type='garbage' and a
+    // schedule_value that parseInt-coerced to a positive integer (e.g. an ISO
+    // timestamp starting with a year) would be treated as an interval task and
+    // reschedule every ~year-ms. Match the original `return null` fallthrough.
+    expect(
+      computeRecurringNextRun(
+        currentTask({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          schedule_type: 'garbage' as any,
+          schedule_value: '2026-01-01T00:00:00.000Z',
+        }),
+        { timezone: TZ, nowMs: NOW },
+      ),
+    ).toEqual({
+      ok: true,
+      nextRun: null,
+      reason: 'unknown_schedule_type',
+    });
+  });
 });
