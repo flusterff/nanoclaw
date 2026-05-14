@@ -7,7 +7,6 @@ import {
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
-  TRIGGER_PATTERN,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
@@ -44,7 +43,12 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  decideAgentCursorAfterRun,
+  decideLiveDispatch,
+  decideMessageDispatch,
+} from './message-dispatch.js';
+import { findChannel, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -157,8 +161,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  const isMainGroup = group.isMain === true;
-
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
     chatJid,
@@ -168,28 +170,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
-      (m) =>
-        TRIGGER_PATTERN.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-    if (!hasTrigger) return true;
-  }
-
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  let allowlistCfg: ReturnType<typeof loadSenderAllowlist> | null = null;
+  const decision = decideMessageDispatch({
+    group,
+    chatJid,
+    newMessages: missedMessages,
+    lastAgentCursor: sinceTimestamp,
+    timezone: TIMEZONE,
+    isTriggerAllowedSender: (sender) => {
+      allowlistCfg ??= loadSenderAllowlist();
+      return isTriggerAllowed(chatJid, sender, allowlistCfg);
+    },
+  });
+  if (!decision.shouldProcess) return true;
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  const attemptedCursor = decision.newAgentCursor!;
+  lastAgentTimestamp[chatJid] = attemptedCursor;
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: decision.messageCount },
     'Processing messages',
   );
 
@@ -211,48 +214,59 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  const output = await runAgent(
+    group,
+    decision.prompt!,
+    chatJid,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
-  if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
-    if (outputSentToUser) {
-      logger.warn(
-        { group: group.name },
-        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
-      );
-      return true;
-    }
-    // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
+  const cursorDecision = decideAgentCursorAfterRun({
+    previousCursor,
+    attemptedCursor,
+    agentErrored: output === 'error' || hadError,
+    outputSentToUser,
+  });
+
+  if (cursorDecision.reason === 'agent_error_after_output') {
+    logger.warn(
+      { group: group.name },
+      'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+    );
+    return true;
+  }
+
+  if (cursorDecision.shouldRollback) {
+    // Roll back cursor so retries can re-process these messages.
+    lastAgentTimestamp[chatJid] = cursorDecision.cursor;
     saveState();
     logger.warn(
       { group: group.name },
@@ -391,41 +405,41 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
-
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (needsTrigger) {
-            const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
-                TRIGGER_PATTERN.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
-            if (!hasTrigger) continue;
-          }
-
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
+          const lastAgentCursor = lastAgentTimestamp[chatJid] || '';
           const allPending = getMessagesSince(
             chatJid,
-            lastAgentTimestamp[chatJid] || '',
+            lastAgentCursor,
             ASSISTANT_NAME,
           );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          let allowlistCfg: ReturnType<typeof loadSenderAllowlist> | null =
+            null;
+          const decision = decideMessageDispatch({
+            group,
+            chatJid,
+            newMessages: groupMessages,
+            pendingMessages: allPending,
+            lastAgentCursor,
+            timezone: TIMEZONE,
+            isTriggerAllowedSender: (sender) => {
+              allowlistCfg ??= loadSenderAllowlist();
+              return isTriggerAllowed(chatJid, sender, allowlistCfg);
+            },
+          });
+          if (!decision.shouldProcess) continue;
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          const liveDecision = decideLiveDispatch(
+            decision,
+            queue.sendMessage(chatJid, decision.prompt!),
+          );
+
+          if (liveDecision.action === 'pipe') {
             logger.debug(
-              { chatJid, count: messagesToSend.length },
+              { chatJid, count: decision.messageCount },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
+            lastAgentTimestamp[chatJid] = liveDecision.newAgentCursor!;
             saveState();
             // Show typing indicator while the container processes the piped message
             channel
@@ -433,7 +447,7 @@ async function startMessageLoop(): Promise<void> {
               ?.catch((err) =>
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
               );
-          } else {
+          } else if (liveDecision.action === 'enqueue') {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
           }
