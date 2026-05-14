@@ -137,6 +137,14 @@ function currentApp() {
   return appRef.current;
 }
 
+function outgoingQueue(channel: SlackChannel) {
+  return (
+    channel as unknown as {
+      outgoingQueue: Array<{ jid: string; chunks: string[] }>;
+    }
+  ).outgoingQueue;
+}
+
 async function triggerMessageEvent(
   event: ReturnType<typeof createMessageEvent>,
 ) {
@@ -161,6 +169,7 @@ describe('SlackChannel', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -765,6 +774,32 @@ describe('SlackChannel', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('retries connected send failures without reconnect', async () => {
+      vi.useFakeTimers();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const postMessage = currentApp().client.chat.postMessage;
+      postMessage.mockRejectedValueOnce(new Error('Network error'));
+
+      await expect(
+        channel.sendMessage('slack:C0123456789', 'Will retry'),
+      ).resolves.toBeUndefined();
+
+      expect(postMessage).toHaveBeenCalledTimes(1);
+      expect(outgoingQueue(channel)).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(postMessage).toHaveBeenCalledTimes(2);
+      expect(postMessage).toHaveBeenLastCalledWith({
+        channel: 'C0123456789',
+        text: 'Will retry',
+      });
+      expect(outgoingQueue(channel)).toHaveLength(0);
+    });
+
     it('splits long messages at 4000 character boundary', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
@@ -965,6 +1000,33 @@ describe('SlackChannel', () => {
         channel: 'C_CCC',
         text: 'to unconfigured C',
       });
+    });
+
+    it('queues only unsent chunks when a long peer message fails mid-send', async () => {
+      vi.useFakeTimers();
+      withPeerMentions('C0123456789:U_PEER_999');
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      const postMessage = currentApp().client.chat.postMessage;
+      postMessage
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('chunk 2 failed'));
+
+      const body = 'A'.repeat(4500);
+      await expect(
+        channel.sendMessage('slack:C0123456789', body),
+      ).resolves.toBeUndefined();
+
+      const finalText = `<@U_PEER_999> ${body}`;
+      const unsentSuffix = finalText.slice(4000);
+      const queue = outgoingQueue(channel);
+
+      expect(postMessage).toHaveBeenCalledTimes(2);
+      expect(queue).toHaveLength(1);
+      expect(queue[0].chunks).toEqual([unsentSuffix]);
+      expect(queue[0].chunks.join('')).not.toBe(finalText);
+      expect(queue[0].chunks.join('').includes('<@U_PEER_999>')).toBe(false);
     });
 
     it('prepends when existing mention falls outside the first chunk and neutralizes the body copy', async () => {

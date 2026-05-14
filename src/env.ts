@@ -1,6 +1,14 @@
 import fs from 'fs';
+import os from 'node:os';
 import path from 'path';
 import { logger } from './logger.js';
+
+function expandPathLikeEnvValue(key: string, value: string): string {
+  if (!key.endsWith('_PATH')) return value;
+  if (value === '~') return os.homedir();
+  if (value.startsWith('~/')) return path.join(os.homedir(), value.slice(2));
+  return value;
+}
 
 /**
  * Parse the .env file and return values for the requested keys.
@@ -35,7 +43,7 @@ export function readEnvFile(keys: string[]): Record<string, string> {
     ) {
       value = value.slice(1, -1);
     }
-    if (value) result[key] = value;
+    if (value) result[key] = expandPathLikeEnvValue(key, value);
   }
 
   return result;
