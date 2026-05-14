@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from './config.js';
+import { decideMessageDispatch } from './message-dispatch.js';
 import {
   escapeXml,
   formatMessages,
@@ -206,22 +207,26 @@ describe('formatOutbound', () => {
 // --- Trigger gating with requiresTrigger flag ---
 
 describe('trigger gating (requiresTrigger interaction)', () => {
-  // Replicates the exact logic from processGroupMessages and startMessageLoop:
-  //   if (!isMainGroup && group.requiresTrigger !== false) { check trigger }
-  function shouldRequireTrigger(
-    isMainGroup: boolean,
-    requiresTrigger: boolean | undefined,
-  ): boolean {
-    return !isMainGroup && requiresTrigger !== false;
-  }
-
   function shouldProcess(
     isMainGroup: boolean,
     requiresTrigger: boolean | undefined,
     messages: NewMessage[],
   ): boolean {
-    if (!shouldRequireTrigger(isMainGroup, requiresTrigger)) return true;
-    return messages.some((m) => TRIGGER_PATTERN.test(m.content.trim()));
+    return decideMessageDispatch({
+      group: {
+        name: 'Test Group',
+        folder: 'test-group',
+        trigger: `@${ASSISTANT_NAME}`,
+        added_at: '2024-01-01T00:00:00.000Z',
+        isMain: isMainGroup,
+        requiresTrigger,
+      },
+      chatJid: 'group@g.us',
+      newMessages: messages,
+      lastAgentCursor: '',
+      allowlist: '*',
+      timezone: 'UTC',
+    }).shouldProcess;
   }
 
   it('main group always processes (no trigger needed)', () => {
