@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // --- Mocks ---
 
@@ -141,6 +144,15 @@ async function triggerMessageEvent(
   if (handler) await handler({ event });
 }
 
+async function waitForFileText(path: string): Promise<string> {
+  for (let i = 0; i < 50; i++) {
+    const text = existsSync(path) ? readFileSync(path, 'utf8') : '';
+    if (text) return text;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return readFileSync(path, 'utf8');
+}
+
 // --- Tests ---
 
 describe('SlackChannel', () => {
@@ -227,6 +239,44 @@ describe('SlackChannel', () => {
           is_from_me: false,
         }),
       );
+    });
+
+    it('writes a TSV event log line when SLACK_EVENT_LOG_PATH is set', async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'nanoclaw-slack-log-'));
+      const logPath = join(tempDir, 'events.tsv');
+
+      try {
+        vi.mocked(readEnvFile).mockReturnValueOnce({
+          SLACK_BOT_TOKEN: 'xoxb-test-token',
+          SLACK_APP_TOKEN: 'xapp-test-token',
+          SLACK_EVENT_LOG_PATH: logPath,
+        });
+
+        const opts = createTestOpts();
+        const channel = new SlackChannel(opts);
+        await channel.connect();
+
+        const event = createMessageEvent({
+          ts: '1778743203.215719',
+          text: 'Raw\tline\n<@U_BOT_123>',
+          user: 'U_USER_456',
+        });
+        await triggerMessageEvent(event);
+
+        // Schema (mutually-agreed with Chanhyeok-AI standalone listener, 2026-05-14):
+        //   event_ts \t channel \t user_id \t thread_ts \t text(JSON.stringify)
+        expect(await waitForFileText(logPath)).toBe(
+          `2026-05-14T07:20:03.215Z\tC0123456789\tU_USER_456\t\t${JSON.stringify('Raw\tline\n<@U_BOT_123>')}\n`,
+        );
+        expect(opts.onMessage).toHaveBeenCalledWith(
+          'slack:C0123456789',
+          expect.objectContaining({
+            content: '@Jonesy Raw\tline\n<@U_BOT_123>',
+          }),
+        );
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
 
     it('only emits metadata for unregistered channels', async () => {
