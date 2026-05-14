@@ -1,13 +1,15 @@
 import fs from 'fs';
 import path from 'path';
 
-import { CronExpressionParser } from 'cron-parser';
-
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import {
+  computeInitialNextRun,
+  computeUpdatedNextRun,
+} from './schedule-policy.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -210,42 +212,38 @@ export async function processTaskIpc(
           break;
         }
 
-        const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
-
-        let nextRun: string | null = null;
-        if (scheduleType === 'cron') {
-          try {
-            const interval = CronExpressionParser.parse(data.schedule_value, {
-              tz: TIMEZONE,
-            });
-            nextRun = interval.next().toISOString();
-          } catch {
+        const nextRunDecision = computeInitialNextRun({
+          scheduleType: data.schedule_type,
+          scheduleValue: data.schedule_value,
+          timezone: TIMEZONE,
+        });
+        if (!nextRunDecision.ok) {
+          if (nextRunDecision.reason === 'invalid_cron') {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid cron expression',
             );
-            break;
-          }
-        } else if (scheduleType === 'interval') {
-          const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms <= 0) {
+          } else if (nextRunDecision.reason === 'invalid_interval') {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid interval',
             );
-            break;
-          }
-          nextRun = new Date(Date.now() + ms).toISOString();
-        } else if (scheduleType === 'once') {
-          const date = new Date(data.schedule_value);
-          if (isNaN(date.getTime())) {
+          } else if (nextRunDecision.reason === 'invalid_once_timestamp') {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid timestamp',
             );
-            break;
+          } else {
+            logger.warn(
+              {
+                scheduleType: data.schedule_type,
+                scheduleValue: data.schedule_value,
+                reason: nextRunDecision.reason,
+              },
+              'Invalid schedule',
+            );
           }
-          nextRun = date.toISOString();
+          break;
         }
 
         const taskId =
@@ -260,10 +258,10 @@ export async function processTaskIpc(
           group_folder: targetFolder,
           chat_jid: targetJid,
           prompt: data.prompt,
-          schedule_type: scheduleType,
-          schedule_value: data.schedule_value,
+          schedule_type: nextRunDecision.scheduleType,
+          schedule_value: nextRunDecision.scheduleValue,
           context_mode: contextMode,
-          next_run: nextRun,
+          next_run: nextRunDecision.nextRun,
           status: 'active',
           created_at: new Date().toISOString(),
         });
@@ -352,40 +350,51 @@ export async function processTaskIpc(
 
         const updates: Parameters<typeof updateTask>[1] = {};
         if (data.prompt !== undefined) updates.prompt = data.prompt;
-        if (data.schedule_type !== undefined)
-          updates.schedule_type = data.schedule_type as
-            | 'cron'
-            | 'interval'
-            | 'once';
-        if (data.schedule_value !== undefined)
-          updates.schedule_value = data.schedule_value;
 
         // Recompute next_run if schedule changed
         if (data.schedule_type || data.schedule_value) {
-          const updatedTask = {
-            ...task,
-            ...updates,
-          };
-          if (updatedTask.schedule_type === 'cron') {
-            try {
-              const interval = CronExpressionParser.parse(
-                updatedTask.schedule_value,
-                { tz: TIMEZONE },
-              );
-              updates.next_run = interval.next().toISOString();
-            } catch {
+          const decision = computeUpdatedNextRun({
+            currentTask: task,
+            scheduleType: data.schedule_type,
+            scheduleValue: data.schedule_value,
+            timezone: TIMEZONE,
+          });
+          if (!decision.ok) {
+            if (decision.reason === 'invalid_cron') {
               logger.warn(
-                { taskId: data.taskId, value: updatedTask.schedule_value },
+                { taskId: data.taskId, value: decision.scheduleValue },
                 'Invalid cron in task update',
               );
-              break;
+            } else {
+              logger.warn(
+                {
+                  taskId: data.taskId,
+                  scheduleType: decision.scheduleType,
+                  scheduleValue: decision.scheduleValue,
+                  reason: decision.reason,
+                },
+                'Invalid schedule in task update',
+              );
             }
-          } else if (updatedTask.schedule_type === 'interval') {
-            const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
-              updates.next_run = new Date(Date.now() + ms).toISOString();
-            }
+            break;
           }
+          if (data.schedule_type !== undefined) {
+            updates.schedule_type = decision.effectiveScheduleType;
+          }
+          if (data.schedule_value !== undefined) {
+            updates.schedule_value = decision.effectiveScheduleValue;
+          }
+          if (decision.nextRunChanged) {
+            updates.next_run = decision.nextRun;
+          }
+        } else {
+          if (data.schedule_type !== undefined)
+            updates.schedule_type = data.schedule_type as
+              | 'cron'
+              | 'interval'
+              | 'once';
+          if (data.schedule_value !== undefined)
+            updates.schedule_value = data.schedule_value;
         }
 
         updateTask(data.taskId, updates);

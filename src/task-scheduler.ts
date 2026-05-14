@@ -1,5 +1,4 @@
 import { ChildProcess } from 'child_process';
-import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
@@ -19,6 +18,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { computeRecurringNextRun } from './schedule-policy.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -29,37 +29,19 @@ import { RegisteredGroup, ScheduledTask } from './types.js';
  * Co-authored-by: @community-pr-601
  */
 export function computeNextRun(task: ScheduledTask): string | null {
-  if (task.schedule_type === 'once') return null;
+  const decision = computeRecurringNextRun(task, { timezone: TIMEZONE });
+  if (decision.ok) return decision.nextRun;
 
-  const now = Date.now();
-
-  if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, {
-      tz: TIMEZONE,
-    });
-    return interval.next().toISOString();
+  if (decision.reason === 'invalid_interval') {
+    // Guard against malformed interval that would cause an infinite loop
+    logger.warn(
+      { taskId: task.id, value: task.schedule_value },
+      'Invalid interval value',
+    );
+    return decision.fallbackNextRun!;
   }
 
-  if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    if (!ms || ms <= 0) {
-      // Guard against malformed interval that would cause an infinite loop
-      logger.warn(
-        { taskId: task.id, value: task.schedule_value },
-        'Invalid interval value',
-      );
-      return new Date(now + 60_000).toISOString();
-    }
-    // Anchor to the scheduled time, not now, to prevent drift.
-    // Skip past any missed intervals so we always land in the future.
-    let next = new Date(task.next_run!).getTime() + ms;
-    while (next <= now) {
-      next += ms;
-    }
-    return new Date(next).toISOString();
-  }
-
-  return null;
+  throw new Error(`Invalid cron expression for task ${task.id}`);
 }
 
 export interface SchedulerDependencies {

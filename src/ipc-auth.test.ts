@@ -328,6 +328,74 @@ describe('cancel_task authorization', () => {
   });
 });
 
+// --- update_task schedule quirks ---
+
+describe('update_task schedule quirks', () => {
+  it('applies invalid interval updates while preserving existing next_run', async () => {
+    createTask({
+      id: 'task-invalid-interval-update',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'original',
+      schedule_type: 'interval',
+      schedule_value: '60000',
+      context_mode: 'isolated',
+      next_run: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-invalid-interval-update',
+        prompt: 'changed',
+        schedule_value: '0',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const task = getTaskById('task-invalid-interval-update')!;
+    expect(task.prompt).toBe('changed');
+    expect(task.schedule_value).toBe('0');
+    expect(task.next_run).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('aborts invalid cron updates without applying other fields', async () => {
+    createTask({
+      id: 'task-invalid-cron-update',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'original',
+      schedule_type: 'cron',
+      schedule_value: '0 9 * * *',
+      context_mode: 'isolated',
+      next_run: '2026-01-01T09:00:00.000Z',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-invalid-cron-update',
+        prompt: 'changed',
+        schedule_value: 'not a cron',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const task = getTaskById('task-invalid-cron-update')!;
+    expect(task.prompt).toBe('original');
+    expect(task.schedule_value).toBe('0 9 * * *');
+    expect(task.next_run).toBe('2026-01-01T09:00:00.000Z');
+  });
+});
+
 // --- register_group authorization ---
 
 describe('register_group authorization', () => {
