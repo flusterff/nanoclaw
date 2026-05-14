@@ -43,3 +43,4 @@ groups/global/*
 
 agents-sdk-docs
 .worktrees/
+.gstack/
