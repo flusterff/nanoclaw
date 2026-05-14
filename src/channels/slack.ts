@@ -1,5 +1,6 @@
 import { App, LogLevel } from '@slack/bolt';
 import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
+import { appendFile } from 'node:fs/promises';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
@@ -16,6 +17,30 @@ import {
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
+
+interface SlackEventLogEntry {
+  eventTs: string;
+  channel: string;
+  userId: string;
+  threadTs: string;
+  text: string;
+}
+
+function formatSlackEventLogLine(entry: SlackEventLogEntry): string {
+  // Schema (mutually-agreed with Chanhyeok-AI standalone listener, 2026-05-14):
+  //   event_ts \t channel \t user_id \t thread_ts \t text(JSON.stringify)
+  // text is JSON.stringify-escaped so embedded tabs/newlines/quotes don't break
+  // the line discipline. Fields 1-4 are simple identifiers (no escaping needed).
+  return [
+    entry.eventTs,
+    entry.channel,
+    entry.userId,
+    entry.threadTs,
+    JSON.stringify(entry.text ?? ''),
+  ]
+    .join('\t')
+    .concat('\n');
+}
 
 /**
  * Parse `SLACK_PEER_MENTIONS` into a per-channel peer user-ID map.
@@ -81,6 +106,8 @@ export class SlackChannel implements Channel {
   private flushing = false;
   private userNameCache = new Map<string, string>();
   private channelPeers: Map<string, string>;
+  private eventLogPath: string | undefined;
+  private eventLogDisabled = false;
 
   private opts: SlackChannelOpts;
 
@@ -93,10 +120,12 @@ export class SlackChannel implements Channel {
       'SLACK_BOT_TOKEN',
       'SLACK_APP_TOKEN',
       'SLACK_PEER_MENTIONS',
+      'SLACK_EVENT_LOG_PATH',
     ]);
     const botToken = env.SLACK_BOT_TOKEN;
     const appToken = env.SLACK_APP_TOKEN;
     this.channelPeers = parsePeerMentions(env.SLACK_PEER_MENTIONS);
+    this.eventLogPath = env.SLACK_EVENT_LOG_PATH || undefined;
 
     if (!botToken || !appToken) {
       throw new Error(
@@ -190,6 +219,14 @@ export class SlackChannel implements Channel {
           content = `@${ASSISTANT_NAME} ${content}`;
         }
       }
+
+      void this.appendSlackEventLog({
+        eventTs: timestamp,
+        channel: msg.channel,
+        userId: msg.user || msg.bot_id || '',
+        threadTs: (msg as { thread_ts?: string }).thread_ts || '',
+        text: msg.text ?? '',
+      });
 
       this.opts.onMessage(jid, {
         id: msg.ts,
@@ -428,6 +465,32 @@ export class SlackChannel implements Channel {
     } catch (err) {
       logger.debug({ userId, err }, 'Failed to resolve Slack user name');
       return undefined;
+    }
+  }
+
+  private async appendSlackEventLog(entry: SlackEventLogEntry): Promise<void> {
+    if (!this.eventLogPath || this.eventLogDisabled) return;
+
+    try {
+      await appendFile(this.eventLogPath, formatSlackEventLogLine(entry));
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? (err as { code?: unknown }).code
+          : undefined;
+      if (code === 'ENOENT') {
+        this.eventLogDisabled = true;
+        logger.warn(
+          { err, path: this.eventLogPath },
+          'Slack event log path unavailable; disabling event log',
+        );
+        return;
+      }
+
+      logger.warn(
+        { err, path: this.eventLogPath },
+        'Failed to append Slack event log',
+      );
     }
   }
 
