@@ -14,6 +14,10 @@ import {
   storeMessage,
   updateTask,
 } from './db.js';
+import {
+  decodeRegisteredGroupRow,
+  decodeScheduledTaskRow,
+} from './db-row-decoders.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -39,6 +43,209 @@ function store(overrides: {
     is_from_me: overrides.is_from_me ?? false,
   });
 }
+
+function scheduledTaskRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'task-1',
+    group_folder: 'main',
+    chat_jid: 'group@g.us',
+    prompt: 'do something',
+    schedule_type: 'once',
+    schedule_value: '2024-06-01T00:00:00.000Z',
+    context_mode: 'isolated',
+    next_run: '2024-06-01T00:00:00.000Z',
+    last_run: '2024-05-01T00:00:00.000Z',
+    last_result: 'ok',
+    status: 'active',
+    created_at: '2024-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function registeredGroupRow(overrides: Record<string, unknown> = {}) {
+  return {
+    jid: 'group@g.us',
+    name: 'Family Chat',
+    folder: 'whatsapp_family',
+    trigger_pattern: '@Andy',
+    added_at: '2024-01-01T00:00:00.000Z',
+    container_config: null,
+    requires_trigger: 1,
+    is_main: 0,
+    ...overrides,
+  };
+}
+
+// --- DB row decoders ---
+
+describe('decodeScheduledTaskRow', () => {
+  it('returns the exact ScheduledTask shape', () => {
+    const decoded = decodeScheduledTaskRow(scheduledTaskRow());
+
+    expect(Object.keys(decoded).sort()).toEqual([
+      'chat_jid',
+      'context_mode',
+      'created_at',
+      'group_folder',
+      'id',
+      'last_result',
+      'last_run',
+      'next_run',
+      'prompt',
+      'schedule_type',
+      'schedule_value',
+      'status',
+    ]);
+    expect(decoded).toEqual({
+      id: 'task-1',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'do something',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: '2024-06-01T00:00:00.000Z',
+      last_run: '2024-05-01T00:00:00.000Z',
+      last_result: 'ok',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('preserves nullable scheduled task fields as null', () => {
+    expect(
+      decodeScheduledTaskRow(
+        scheduledTaskRow({
+          next_run: null,
+          last_run: null,
+          last_result: null,
+        }),
+      ),
+    ).toMatchObject({
+      next_run: null,
+      last_run: null,
+      last_result: null,
+    });
+  });
+
+  it('rejects missing or invalid required fields', () => {
+    const { id: _id, ...missingId } = scheduledTaskRow();
+
+    expect(() => decodeScheduledTaskRow(missingId)).toThrow(/id/);
+    expect(() =>
+      decodeScheduledTaskRow(scheduledTaskRow({ group_folder: null })),
+    ).toThrow(/group_folder/);
+  });
+
+  it('does not enforce enum domains that SQLite does not enforce', () => {
+    expect(
+      decodeScheduledTaskRow(
+        scheduledTaskRow({
+          schedule_type: 'legacy',
+          context_mode: 'legacy',
+          status: 'legacy',
+        }),
+      ),
+    ).toMatchObject({
+      schedule_type: 'legacy',
+      context_mode: 'legacy',
+      status: 'legacy',
+    });
+  });
+});
+
+describe('decodeRegisteredGroupRow', () => {
+  it('parses container_config and normalizes SQLite integer booleans', () => {
+    const decoded = decodeRegisteredGroupRow(
+      registeredGroupRow({
+        container_config: JSON.stringify({
+          timeout: 123,
+          additionalMounts: [{ hostPath: '~/src', readonly: true }],
+        }),
+        requires_trigger: 0,
+        is_main: 1,
+      }),
+      (folder) => folder === 'whatsapp_family',
+    );
+
+    expect(decoded).toEqual({
+      ok: true,
+      group: {
+        jid: 'group@g.us',
+        name: 'Family Chat',
+        folder: 'whatsapp_family',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00.000Z',
+        containerConfig: {
+          timeout: 123,
+          additionalMounts: [{ hostPath: '~/src', readonly: true }],
+        },
+        requiresTrigger: false,
+        isMain: true,
+      },
+    });
+  });
+
+  it('preserves current optional boolean mapping', () => {
+    expect(
+      decodeRegisteredGroupRow(
+        registeredGroupRow({ requires_trigger: 1, is_main: 0 }),
+        () => true,
+      ),
+    ).toEqual({
+      ok: true,
+      group: {
+        jid: 'group@g.us',
+        name: 'Family Chat',
+        folder: 'whatsapp_family',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00.000Z',
+        containerConfig: undefined,
+        requiresTrigger: true,
+        isMain: undefined,
+      },
+    });
+
+    expect(
+      decodeRegisteredGroupRow(
+        registeredGroupRow({ requires_trigger: null, is_main: null }),
+        () => true,
+      ),
+    ).toMatchObject({
+      ok: true,
+      group: {
+        requiresTrigger: undefined,
+        isMain: undefined,
+      },
+    });
+  });
+
+  it('returns invalid_group_folder without parsing container_config', () => {
+    expect(
+      decodeRegisteredGroupRow(
+        registeredGroupRow({
+          folder: '../outside',
+          container_config: '{not valid json',
+        }),
+        () => false,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: 'invalid_group_folder',
+      jid: 'group@g.us',
+      folder: '../outside',
+    });
+  });
+
+  it('lets invalid container_config JSON throw for valid folders', () => {
+    expect(() =>
+      decodeRegisteredGroupRow(
+        registeredGroupRow({ container_config: '{not valid json' }),
+        () => true,
+      ),
+    ).toThrow(SyntaxError);
+  });
+});
 
 // --- storeMessage (NewMessage format) ---
 
