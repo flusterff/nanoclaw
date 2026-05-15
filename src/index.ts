@@ -16,6 +16,7 @@ import {
 } from './channels/registry.js';
 import {
   ContainerOutput,
+  projectTaskRow,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
@@ -292,15 +293,7 @@ async function runAgent(
   writeTasksSnapshot(
     group.folder,
     isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
+    tasks.map(projectTaskRow),
   );
 
   // Update available groups snapshot (main group only can see all groups)
@@ -647,15 +640,7 @@ async function main(): Promise<void> {
       writeGroupsSnapshot(gf, im, ag, rj),
     onTasksChanged: () => {
       const tasks = getAllTasks();
-      const taskRows = tasks.map((t) => ({
-        id: t.id,
-        groupFolder: t.group_folder,
-        prompt: t.prompt,
-        schedule_type: t.schedule_type,
-        schedule_value: t.schedule_value,
-        status: t.status,
-        next_run: t.next_run,
-      }));
+      const taskRows = tasks.map(projectTaskRow);
       for (const group of Object.values(registeredGroups)) {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
