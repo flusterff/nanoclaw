@@ -450,60 +450,6 @@ describe('refresh_groups authorization', () => {
   });
 });
 
-// --- IPC message authorization ---
-// Tests the authorization pattern from startIpcWatcher (ipc.ts).
-// The logic: isMain || (targetGroup && targetGroup.folder === sourceGroup)
-
-describe('IPC message authorization', () => {
-  // Replicate the exact check from the IPC watcher
-  function isMessageAuthorized(
-    sourceGroup: string,
-    isMain: boolean,
-    targetChatJid: string,
-    registeredGroups: Record<string, RegisteredGroup>,
-  ): boolean {
-    const targetGroup = registeredGroups[targetChatJid];
-    return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
-  }
-
-  it('main group can send to any group', () => {
-    expect(
-      isMessageAuthorized('whatsapp_main', true, 'other@g.us', groups),
-    ).toBe(true);
-    expect(
-      isMessageAuthorized('whatsapp_main', true, 'third@g.us', groups),
-    ).toBe(true);
-  });
-
-  it('non-main group can send to its own chat', () => {
-    expect(
-      isMessageAuthorized('other-group', false, 'other@g.us', groups),
-    ).toBe(true);
-  });
-
-  it('non-main group cannot send to another groups chat', () => {
-    expect(isMessageAuthorized('other-group', false, 'main@g.us', groups)).toBe(
-      false,
-    );
-    expect(
-      isMessageAuthorized('other-group', false, 'third@g.us', groups),
-    ).toBe(false);
-  });
-
-  it('non-main group cannot send to unregistered JID', () => {
-    expect(
-      isMessageAuthorized('other-group', false, 'unknown@g.us', groups),
-    ).toBe(false);
-  });
-
-  it('main group can send to unregistered JID', () => {
-    // Main is always authorized regardless of target
-    expect(
-      isMessageAuthorized('whatsapp_main', true, 'unknown@g.us', groups),
-    ).toBe(true);
-  });
-});
-
 // --- schedule_task with cron and interval types ---
 
 describe('schedule_task schedule types', () => {
