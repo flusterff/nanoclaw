@@ -6,6 +6,7 @@ import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { chunkText } from './chunk-text.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -351,7 +352,7 @@ export class SlackChannel implements Channel {
   async sendMessage(jid: string, text: string): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     const finalText = this.enforcePeerMention(channelId, text);
-    const chunks = this.splitMessage(finalText);
+    const chunks = chunkText(finalText, MAX_MESSAGE_LENGTH);
 
     if (!this.connected || this.outgoingQueue.length > 0 || this.flushing) {
       this.enqueueOutgoing(jid, chunks);
@@ -377,20 +378,6 @@ export class SlackChannel implements Channel {
       );
       this.scheduleOutgoingQueueFlush(failure.retryAfterMs, item);
     }
-  }
-
-  /**
-   * Split before posting so retry queue entries can keep only unsent chunks.
-   */
-  private splitMessage(text: string): string[] {
-    if (text.length <= MAX_MESSAGE_LENGTH) {
-      return [text];
-    }
-    const chunks: string[] = [];
-    for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
-      chunks.push(text.slice(i, i + MAX_MESSAGE_LENGTH));
-    }
-    return chunks;
   }
 
   /**
