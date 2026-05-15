@@ -115,11 +115,7 @@ async function runTask(
   // Update tasks snapshot for container to read (filtered by group)
   const isMain = group.isMain === true;
   const tasks = getAllTasks();
-  writeTasksSnapshot(
-    task.group_folder,
-    isMain,
-    tasks.map(projectTaskRow),
-  );
+  writeTasksSnapshot(task.group_folder, isMain, tasks.map(projectTaskRow));
 
   let result: string | null = null;
   let error: string | null = null;

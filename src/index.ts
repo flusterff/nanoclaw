@@ -290,11 +290,7 @@ async function runAgent(
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
-  writeTasksSnapshot(
-    group.folder,
-    isMain,
-    tasks.map(projectTaskRow),
-  );
+  writeTasksSnapshot(group.folder, isMain, tasks.map(projectTaskRow));
 
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
