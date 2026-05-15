@@ -3,6 +3,10 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import {
+  decodeRegisteredGroupRow,
+  decodeScheduledTaskRow,
+} from './db-row-decoders.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -114,6 +118,18 @@ function createSchema(database: Database.Database): void {
     // Backfill: existing rows with folder = 'main' are the main group
     database.exec(
       `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add requires_trigger column if it doesn't exist (migration for legacy
+  // DBs created before this column was added to CREATE TABLE).
+  // The strict row decoder in db-row-decoders.ts will reject undefined here,
+  // so this migration is load-bearing for upgrade safety on old installs.
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN requires_trigger INTEGER DEFAULT 1`,
     );
   } catch {
     /* column already exists */
@@ -392,9 +408,8 @@ export function createTask(
 }
 
 export function getTaskById(id: string): ScheduledTask | undefined {
-  return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id) as
-    | ScheduledTask
-    | undefined;
+  const row = db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id);
+  return row ? decodeScheduledTaskRow(row) : undefined;
 }
 
 export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
@@ -402,13 +417,15 @@ export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
     .prepare(
       'SELECT * FROM scheduled_tasks WHERE group_folder = ? ORDER BY created_at DESC',
     )
-    .all(groupFolder) as ScheduledTask[];
+    .all(groupFolder)
+    .map(decodeScheduledTaskRow);
 }
 
 export function getAllTasks(): ScheduledTask[] {
   return db
     .prepare('SELECT * FROM scheduled_tasks ORDER BY created_at DESC')
-    .all() as ScheduledTask[];
+    .all()
+    .map(decodeScheduledTaskRow);
 }
 
 export function updateTask(
@@ -468,7 +485,8 @@ export function getDueTasks(): ScheduledTask[] {
     ORDER BY next_run
   `,
     )
-    .all(now) as ScheduledTask[];
+    .all(now)
+    .map(decodeScheduledTaskRow);
 }
 
 export function updateTaskAfterRun(
@@ -550,39 +568,17 @@ export function getRegisteredGroup(
 ): (RegisteredGroup & { jid: string }) | undefined {
   const row = db
     .prepare('SELECT * FROM registered_groups WHERE jid = ?')
-    .get(jid) as
-    | {
-        jid: string;
-        name: string;
-        folder: string;
-        trigger_pattern: string;
-        added_at: string;
-        container_config: string | null;
-        requires_trigger: number | null;
-        is_main: number | null;
-      }
-    | undefined;
+    .get(jid);
   if (!row) return undefined;
-  if (!isValidGroupFolder(row.folder)) {
+  const decoded = decodeRegisteredGroupRow(row, isValidGroupFolder);
+  if (!decoded.ok) {
     logger.warn(
-      { jid: row.jid, folder: row.folder },
+      { jid: decoded.jid, folder: decoded.folder },
       'Skipping registered group with invalid folder',
     );
     return undefined;
   }
-  return {
-    jid: row.jid,
-    name: row.name,
-    folder: row.folder,
-    trigger: row.trigger_pattern,
-    added_at: row.added_at,
-    containerConfig: row.container_config
-      ? JSON.parse(row.container_config)
-      : undefined,
-    requiresTrigger:
-      row.requires_trigger === null ? undefined : row.requires_trigger === 1,
-    isMain: row.is_main === 1 ? true : undefined,
-  };
+  return decoded.group;
 }
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
@@ -605,37 +601,19 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
-  const rows = db.prepare('SELECT * FROM registered_groups').all() as Array<{
-    jid: string;
-    name: string;
-    folder: string;
-    trigger_pattern: string;
-    added_at: string;
-    container_config: string | null;
-    requires_trigger: number | null;
-    is_main: number | null;
-  }>;
+  const rows = db.prepare('SELECT * FROM registered_groups').all();
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
-    if (!isValidGroupFolder(row.folder)) {
+    const decoded = decodeRegisteredGroupRow(row, isValidGroupFolder);
+    if (!decoded.ok) {
       logger.warn(
-        { jid: row.jid, folder: row.folder },
+        { jid: decoded.jid, folder: decoded.folder },
         'Skipping registered group with invalid folder',
       );
       continue;
     }
-    result[row.jid] = {
-      name: row.name,
-      folder: row.folder,
-      trigger: row.trigger_pattern,
-      added_at: row.added_at,
-      containerConfig: row.container_config
-        ? JSON.parse(row.container_config)
-        : undefined,
-      requiresTrigger:
-        row.requires_trigger === null ? undefined : row.requires_trigger === 1,
-      isMain: row.is_main === 1 ? true : undefined,
-    };
+    const { jid, ...group } = decoded.group;
+    result[jid] = group;
   }
   return result;
 }
