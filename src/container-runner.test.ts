@@ -86,8 +86,12 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
-import type { RegisteredGroup } from './types.js';
+import {
+  projectTaskRow,
+  runContainerAgent,
+  ContainerOutput,
+} from './container-runner.js';
+import type { RegisteredGroup, ScheduledTask } from './types.js';
 
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
@@ -102,6 +106,46 @@ const testInput = {
   chatJid: 'test@g.us',
   isMain: false,
 };
+
+describe('projectTaskRow', () => {
+  it('projects scheduled task rows in snapshot field order', () => {
+    const task: ScheduledTask = {
+      id: 'task-1',
+      group_folder: 'test-group',
+      chat_jid: 'test@g.us',
+      prompt: 'Run status check',
+      schedule_type: 'cron',
+      schedule_value: '0 9 * * *',
+      context_mode: 'group',
+      next_run: '2026-01-01T09:00:00.000Z',
+      last_run: '2025-12-31T09:00:00.000Z',
+      last_result: 'done',
+      status: 'active',
+      created_at: '2025-12-01T00:00:00.000Z',
+    };
+
+    const row = projectTaskRow(task);
+
+    expect(row).toEqual({
+      id: 'task-1',
+      groupFolder: 'test-group',
+      prompt: 'Run status check',
+      schedule_type: 'cron',
+      schedule_value: '0 9 * * *',
+      status: 'active',
+      next_run: '2026-01-01T09:00:00.000Z',
+    });
+    expect(Object.keys(row)).toEqual([
+      'id',
+      'groupFolder',
+      'prompt',
+      'schedule_type',
+      'schedule_value',
+      'status',
+      'next_run',
+    ]);
+  });
+});
 
 function emitOutputMarker(
   proc: ReturnType<typeof createFakeProcess>,

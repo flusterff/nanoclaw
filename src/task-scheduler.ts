@@ -4,6 +4,7 @@ import fs from 'fs';
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
+  projectTaskRow,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -114,19 +115,7 @@ async function runTask(
   // Update tasks snapshot for container to read (filtered by group)
   const isMain = group.isMain === true;
   const tasks = getAllTasks();
-  writeTasksSnapshot(
-    task.group_folder,
-    isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
-  );
+  writeTasksSnapshot(task.group_folder, isMain, tasks.map(projectTaskRow));
 
   let result: string | null = null;
   let error: string | null = null;
