@@ -91,6 +91,8 @@ import {
   runContainerAgent,
   ContainerOutput,
 } from './container-runner.js';
+import { spawn } from 'child_process';
+import { validateAdditionalMounts } from './mount-security.js';
 import type { RegisteredGroup, ScheduledTask } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -154,6 +156,65 @@ function emitOutputMarker(
   const json = JSON.stringify(output);
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
 }
+
+describe('container-runner mount validation integration', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(validateAdditionalMounts).mockClear();
+    vi.mocked(validateAdditionalMounts).mockReturnValue([]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('validates additional mounts before spawn and omits rejected mounts', async () => {
+    const requestedMounts = [
+      {
+        hostPath: '/secret/.env',
+        containerPath: 'secret-env',
+        readonly: false,
+      },
+    ];
+    const groupWithRejectedMount: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        additionalMounts: requestedMounts,
+      },
+    };
+
+    const resultPromise = runContainerAgent(
+      groupWithRejectedMount,
+      testInput,
+      () => {},
+    );
+
+    expect(validateAdditionalMounts).toHaveBeenCalledWith(
+      requestedMounts,
+      'Test Group',
+      false,
+    );
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(validateAdditionalMounts).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(spawn).mock.invocationCallOrder[0]);
+
+    const spawnArgs = vi.mocked(spawn).mock.calls[0][1] as string[];
+    expect(spawnArgs.join('\0')).not.toContain('/secret/.env');
+    expect(spawnArgs.join('\0')).not.toContain('secret-env');
+
+    emitOutputMarker(fakeProc, { status: 'success', result: 'ok' });
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(resultPromise).resolves.toEqual({
+      status: 'success',
+      result: 'ok',
+    });
+  });
+});
 
 describe('container-runner timeout behavior', () => {
   beforeEach(() => {
