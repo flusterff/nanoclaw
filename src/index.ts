@@ -42,7 +42,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import { startIpcWatcher } from './ipc-watcher.js';
 import {
   decideAgentCursorAfterRun,
   decideLiveDispatch,
