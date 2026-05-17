@@ -54,7 +54,10 @@ DIFF_STAT=$(git diff --stat 2>/dev/null | tail -30)
 DIFF_NAMES=$(git diff --name-status 2>/dev/null | head -50)
 WORKTREES=$(git worktree list --porcelain 2>/dev/null)
 WORKTREE_COUNT=$(echo "$WORKTREES" | awk '/^worktree /' | wc -l | tr -d ' ')
-WORKTREE_PATH=$(git rev-parse --git-common-dir 2>/dev/null)
+# Detect sibling-worktree mode (git-common-dir != .git means we're in a worktree, not main repo).
+# IS_WORKTREE is what callers actually need; the actual checkout root is REPO_ROOT (above).
+COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+[ "$COMMON_DIR" = ".git" ] && IS_WORKTREE=false || IS_WORKTREE=true
 SESSION_COLOR=$(cat .claude/session-color 2>/dev/null || echo null)
 # Fail-open gh pr list:
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
@@ -119,7 +122,9 @@ For each prior handoff in `SUPERSEDES`: edit its frontmatter `status:` field to 
 
 ### Step 5: Write the handoff file
 
-Path: `~/.claude/projects/-Users-will-nanoclaw/memory/handoff_<branch-slug>_<YYYYMMDD-HHMMSS>.md`
+Path: `~/.claude/projects/-Users-will-nanoclaw/memory/handoff_<YYYYMMDD-HHMMSS>_<branch-slug>.md`
+
+**Timestamp comes BEFORE branch slug.** This ensures plain filename sort = chronological order across all branches/repos, which is the canonical order for `list --all`. Sorting by branch slug first (the v0 design) breaks `--all` ordering across branches.
 
 Branch slug sanitize (allowlist + collision-safe; `/` must become `-` so `feat/foo` doesn't collide with `featfoo`):
 
@@ -134,11 +139,11 @@ Frontmatter schema:
 
 ```yaml
 ---
-name: handoff_<branch-slug>_<timestamp>
+name: handoff_<timestamp>_<branch-slug>
 description: <one-line for MEMORY.md index>
 type: handoff
 metadata:
-  handoff_id: <slug>_<timestamp>
+  handoff_id: <timestamp>_<branch-slug>
   parent_handoff: <previous-handoff-id-or-null>
   supersedes: [<id>, ...]
   status: in-progress           # one of: in-progress | shipped | abandoned | superseded
@@ -150,7 +155,7 @@ metadata:
   head: <short SHA>
   upstream: <origin/branch-or-null>
   base_commit: <short SHA>
-  worktree_path: <pwd-or-null>
+  is_worktree: true | false        # true if current checkout is a git worktree (not main repo)
   dirty: true | false
   dirty_files: [<path>, ...]
   active_step: <one-line>
@@ -172,7 +177,7 @@ metadata:
 Prepend one-line entry at the top of the appropriate section in `~/.claude/projects/-Users-will-nanoclaw/memory/MEMORY.md`:
 
 ```
-- [<title>](handoff_<slug>_<timestamp>.md) — 🔄 IN PROGRESS — <repo>:<branch> — <one-line desc>
+- [<title>](handoff_<timestamp>_<slug>.md) — 🔄 IN PROGRESS — <repo>:<branch> — <one-line desc>
 ```
 
 For each id in `SUPERSEDES`: find its MEMORY.md line and prepend `[SUPERSEDED]` tag.
@@ -317,7 +322,7 @@ If C: just exit.
 find ~/.claude/projects/-Users-will-nanoclaw/memory -maxdepth 1 -name "handoff_*.md" -type f | sort -r
 ```
 
-(Filename `YYYYMMDD-HHMMSS` prefix makes filename sort the canonical chronological order — robust across rsync/copy unlike mtime.)
+(Filename `handoff_<YYYYMMDD-HHMMSS>_<slug>.md` puts timestamp BEFORE slug so `sort -r` gives true chronological order across all branches/repos. Filename sort is robust across rsync/copy unlike mtime.)
 
 ### Step 2: Filter
 
