@@ -1,1 +1,29 @@
-{}
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/check-syntax.sh",
+            "timeout": 10,
+            "statusMessage": "Checking syntax..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/session-start-color.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
