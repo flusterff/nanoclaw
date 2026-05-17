@@ -47,8 +47,11 @@ BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
 HEAD_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BASE_COMMIT=$(git rev-parse --short "$(git merge-base HEAD main 2>/dev/null || git merge-base HEAD master 2>/dev/null || echo HEAD)" 2>/dev/null || echo unknown)
 UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo null)
-git status --porcelain=v2 --branch 2>/dev/null > /tmp/_handoff_status.tmp
-DIRTY_FILES=$(awk '/^[12u?] /{print $NF}' /tmp/_handoff_status.tmp | head -50)
+# Keep porcelain output in a bash variable, not a temp file. Avoids /tmp clobber
+# under concurrent /handoff save invocations and keeps the skill's writes scoped
+# to memory dir + MEMORY.md + SYNC.md per the HARD GATE.
+STATUS_OUT=$(git status --porcelain=v2 --branch 2>/dev/null)
+DIRTY_FILES=$(echo "$STATUS_OUT" | awk '/^[12u?] /{print $NF}' | head -50)
 [ -n "$DIRTY_FILES" ] && DIRTY=true || DIRTY=false
 DIFF_STAT=$(git diff --stat 2>/dev/null | tail -30)
 DIFF_NAMES=$(git diff --name-status 2>/dev/null | head -50)
@@ -58,18 +61,44 @@ WORKTREE_COUNT=$(echo "$WORKTREES" | awk '/^worktree /' | wc -l | tr -d ' ')
 # IS_WORKTREE is what callers actually need; the actual checkout root is REPO_ROOT (above).
 COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
 [ "$COMMON_DIR" = ".git" ] && IS_WORKTREE=false || IS_WORKTREE=true
-SESSION_COLOR=$(cat .claude/session-color 2>/dev/null || echo null)
-# Fail-open gh pr list. IMPORTANT: derive --repo from origin URL — default `gh pr list`
-# queries upstream-tracked remote, which on a fork (e.g. flusterff/nanoclaw) misses PRs
-# you actually care about (per project HARD RULE feedback_never_pr_to_upstream_nanoclaw).
-GH_REPO=$(git config --get remote.origin.url 2>/dev/null | sed -E 's|.*[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-  OPEN_PRS=$(gh pr list --head "$BRANCH" --repo "$GH_REPO" --json number,url -q '.[] | "#\(.number)|\(.url)"' 2>/dev/null | head -10)
-  PR_PROBE_NOTE=null
-elif ! command -v gh >/dev/null 2>&1; then
-  OPEN_PRS=""; PR_PROBE_NOTE="gh missing"
+# Session color: per project CLAUDE.md, Codex-Claude sessions use the
+# codex-claude-session helper; other Claude sessions read .claude/session-color
+# (the worktree default). Disambiguate via $CLAUDE_CODE_SESSION_ID — set by
+# Claude Code itself, absent in pure Codex sessions. (The helper alone is not
+# a disambiguator: it auto-creates a codex-<id> label even when called from
+# Claude Code, so its presence cannot prove Codex context.)
+if [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; then
+  SESSION_COLOR=$(cat "$REPO_ROOT/.claude/session-color" 2>/dev/null || echo null)
+  SOURCE_SESSION=claude
 else
+  SESSION_COLOR=$(/Users/will/.local/bin/codex-claude-session --root "$REPO_ROOT" 2>/dev/null | sed -n 's/^Color: //p')
+  SOURCE_SESSION=codex-claude
+fi
+[ -z "$SESSION_COLOR" ] && SESSION_COLOR=null
+# Fail-open gh pr list. Two concerns this code handles:
+#  (a) Default `gh pr list` queries the upstream-tracked remote, which on a fork
+#      (e.g. flusterff/nanoclaw) misses PRs you actually care about (per project
+#      HARD RULE feedback_never_pr_to_upstream_nanoclaw). Derive --repo from
+#      origin URL.
+#  (b) Distinguish three outcomes — "gh succeeded, no PRs" vs "gh succeeded with
+#      PRs" vs "gh ran but failed (transient/parse/offline)". A silent failure
+#      that looks like "no PRs" misleads the staleness probe at restore time.
+GH_REPO=$(git config --get remote.origin.url 2>/dev/null | sed -E 's|.*[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
+if ! command -v gh >/dev/null 2>&1; then
+  OPEN_PRS=""; PR_PROBE_NOTE="gh missing"
+elif ! gh auth status >/dev/null 2>&1; then
   OPEN_PRS=""; PR_PROBE_NOTE="gh unauthenticated"
+else
+  GH_OUT=$(gh pr list --head "$BRANCH" --repo "$GH_REPO" --json number,url -q '.[] | "#\(.number)|\(.url)"' 2>&1)
+  GH_EXIT=$?
+  if [ "$GH_EXIT" -eq 0 ]; then
+    OPEN_PRS=$(echo "$GH_OUT" | head -10)
+    PR_PROBE_NOTE=null
+  else
+    OPEN_PRS=""
+    # Truncate any multi-line error so frontmatter stays clean.
+    PR_PROBE_NOTE="gh probe failed (exit ${GH_EXIT}): $(echo "$GH_OUT" | head -1 | cut -c1-80)"
+  fi
 fi
 ```
 
