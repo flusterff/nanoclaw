@@ -192,14 +192,21 @@ If the resulting file path already exists (same-second double save), append a 4-
 
 Frontmatter schema:
 
+**IMPORTANT — YAML safety.** The user's auto-memory post-processor rewrites memory files with strict YAML semantics. Two consequences for `/handoff` frontmatter:
+
+1. **Always double-quote `description` and any free-text field that can contain `#`, `:`, `"`, `'`, `[`, `]`, `{`, `}`, `&`, `*`, `!`, `|`, `>`, `%`, `@`, `` ` `` or leading whitespace.** Unquoted `description: PR #18 shipped` → post-processor reads `#18 shipped` as a YAML comment → description silently truncates to `PR`. (Verified 2026-05-17 dogfood — see SYNC.md.)
+2. **`null`-valued fields are stripped** by the post-processor. Don't rely on `parent_handoff: null` to survive — omit the field instead, or quote `"null"` as a string if the literal value matters.
+
+Treat the schema below as the SOURCE-OF-TRUTH SHAPE; the on-disk file may have `type` moved inside `metadata:`, `node_type: memory` injected, and `originSessionId` appended — that's the post-processor and is harmless. Read frontmatter with `sed -n 's/^  KEY: //p'` which is post-processor-tolerant.
+
 ```yaml
 ---
 name: handoff_<timestamp>_<branch-slug>
-description: <one-line for MEMORY.md index>
+description: "<one-line for MEMORY.md index — ALWAYS DOUBLE-QUOTED>"
 type: handoff
 metadata:
   handoff_id: <timestamp>_<branch-slug>
-  parent_handoff: <previous-handoff-id-or-null>
+  parent_handoff: <previous-handoff-id>  # omit field entirely if no parent (do NOT write `null`)
   supersedes: [<id>, ...]
   status: in-progress           # one of: in-progress | shipped | abandoned | superseded
   saved_at: <ISO-8601>
@@ -213,14 +220,17 @@ metadata:
   is_worktree: true | false        # true if current checkout is a git worktree (not main repo)
   dirty: true | false
   dirty_files: [<path>, ...]
-  active_step: <one-line>
-  first_action: <one-line — printed by restore, NEVER auto-executed>
+  active_step: "<one-line — DOUBLE-QUOTED in case it contains : / # $ etc.>"
+  first_action: "<one-line — DOUBLE-QUOTED — printed by restore, NEVER auto-executed>"
   next_owner: self | codex | will | external-wait
-  blocked_until: <one-line condition or null>
-  do_not_do: [<list>]
+  blocked_until: "<one-line condition>"  # omit field if no blocker (do NOT write `null`)
+  do_not_do:
+    - "<item 1 — DOUBLE-QUOTED if it contains : # $ etc.>"
+    - "<item 2>"
   resume_mode: read-only | dry-run | execute
-  open_prs: [<#N|url>, ...]
-  open_prs_probe_note: <null | "gh missing" | "gh unauthenticated">
+  open_prs:
+    - "#<N>|<url>"  # PR numbers contain `#` — REQUIRES quoting
+  open_prs_probe_note: "<null-string-or-failure-message>"  # always quoted; use the literal string "null" if no note
   related_handoffs: [<id>, ...]
   files_modified: [<path>, ...]   # from dirty_files
   files_planned: [<path>, ...]    # synthesized from conversation
