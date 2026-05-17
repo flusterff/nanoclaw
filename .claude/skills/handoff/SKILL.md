@@ -59,9 +59,12 @@ WORKTREE_COUNT=$(echo "$WORKTREES" | awk '/^worktree /' | wc -l | tr -d ' ')
 COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
 [ "$COMMON_DIR" = ".git" ] && IS_WORKTREE=false || IS_WORKTREE=true
 SESSION_COLOR=$(cat .claude/session-color 2>/dev/null || echo null)
-# Fail-open gh pr list:
+# Fail-open gh pr list. IMPORTANT: derive --repo from origin URL — default `gh pr list`
+# queries upstream-tracked remote, which on a fork (e.g. flusterff/nanoclaw) misses PRs
+# you actually care about (per project HARD RULE feedback_never_pr_to_upstream_nanoclaw).
+GH_REPO=$(git config --get remote.origin.url 2>/dev/null | sed -E 's|.*[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-  OPEN_PRS=$(gh pr list --head "$BRANCH" --json number,url -q '.[] | "#\(.number)|\(.url)"' 2>/dev/null | head -10)
+  OPEN_PRS=$(gh pr list --head "$BRANCH" --repo "$GH_REPO" --json number,url -q '.[] | "#\(.number)|\(.url)"' 2>/dev/null | head -10)
   PR_PROBE_NOTE=null
 elif ! command -v gh >/dev/null 2>&1; then
   OPEN_PRS=""; PR_PROBE_NOTE="gh missing"
@@ -102,18 +105,26 @@ Sections to include (omit any that are empty — never write empty headers):
 ### Step 4: Compute supersession (metadata-only mutation)
 
 ```bash
-# Find prior in-progress handoffs on the same repo_root + branch
+# Find prior in-progress handoffs on the same repo_root + branch.
+#
+# IMPORTANT: parse frontmatter with `sed -n 's/^  KEY: //p' | head -1`, NOT awk.
+# The Skill tool substitutes positional argument refs (dollar-1 through dollar-9)
+# in the rendered SKILL.md BEFORE bash sees it, so an awk field reference like
+# (dollar-2) gets replaced by the user's second argument word (garbage).
+# Using sed avoids positional-argument literals entirely.
+# (Bug verified during 2026-05-17 dogfood — see SYNC.md follow-up note.)
 PRIOR=$(find ~/.claude/projects/-Users-will-nanoclaw/memory -maxdepth 1 -name "handoff_*.md" -type f 2>/dev/null)
 SUPERSEDES=()
 for f in $PRIOR; do
-  P_REPO=$(awk '/^  repo_root:/{print $2; exit}' "$f")
-  P_BRANCH=$(awk '/^  branch:/{print $2; exit}' "$f")
-  P_STATUS=$(awk '/^  status:/{print $2; exit}' "$f")
-  P_ID=$(awk '/^  handoff_id:/{print $2; exit}' "$f")
+  P_REPO=$(sed -n 's/^  repo_root: //p' "$f" | head -1)
+  P_BRANCH=$(sed -n 's/^  branch: //p' "$f" | head -1)
+  P_STATUS=$(sed -n 's/^  status: //p' "$f" | head -1)
+  P_ID=$(sed -n 's/^  handoff_id: //p' "$f" | head -1)
   if [ "$P_REPO" = "$REPO_ROOT" ] && [ "$P_BRANCH" = "$BRANCH" ] && [ "$P_STATUS" = "in-progress" ]; then
     SUPERSEDES+=("$P_ID")
-    # Metadata-only update: rewrite status: in-progress → superseded. Body untouched.
-    # Use sed -i or equivalent that touches only the metadata block.
+    # Metadata-only update on the prior handoff: rewrite `  status: in-progress` →
+    # `  status: superseded`. Body untouched. Use `sed -i.bak` for atomic in-place edit,
+    # then rm the backup. Operates only on the frontmatter block.
   fi
 done
 ```
@@ -334,12 +345,23 @@ CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
 - Default: include only handoffs whose frontmatter `repo_root == CURRENT_REPO AND branch == CURRENT_BRANCH`.
 - `--all`: include everything.
 
-Use `yq` if available; otherwise `awk` between the two `---` lines:
+Parse frontmatter inline with `sed`. Avoid awk patterns that reference positional fields (`dollar-1`, `dollar-2`, ...) because the Skill tool substitutes those at SKILL.md render time before bash sees them, clobbering awk's field references (verified 2026-05-17 dogfood). `yq` works too if available, but the sed form has no dependency:
 
 ```bash
-get_frontmatter_field() {
-  awk -v key="$1" '/^---$/{n++; next} n==1 && $1==key":"{$1=""; sub(/^ +/,""); print; exit}' "$2"
-}
+# For each handoff file $f, extract one field with:
+#   sed -n 's/^  KEY: //p' "$f" | head -1
+# Example uses below in the per-row loop:
+for f in $CANDIDATES; do
+  F_REPO=$(sed -n 's/^  repo_root: //p' "$f" | head -1)
+  F_BRANCH=$(sed -n 's/^  branch: //p' "$f" | head -1)
+  F_STATUS=$(sed -n 's/^  status: //p' "$f" | head -1)
+  F_DIRTY=$(sed -n 's/^  dirty: //p' "$f" | head -1)
+  F_NEXT=$(sed -n 's/^  next_owner: //p' "$f" | head -1)
+  F_SAVED=$(sed -n 's/^  saved_at: //p' "$f" | head -1)
+  F_DESC=$(sed -n 's/^description: //p' "$f" | head -1)
+  # Apply repo+branch filter unless --all
+  ...
+done
 ```
 
 ### Step 3: Render table
