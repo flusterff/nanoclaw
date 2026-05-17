@@ -44,3 +44,10 @@ groups/global/*
 agents-sdk-docs
 .worktrees/
 .gstack/
+
+# Claude Code local-only state (per-developer overrides; never tracked)
+.claude/settings.local.json
+.claude/.notify-state/
+.claude/scheduled_tasks.lock
+.claude/session-color
+.claude-return-prompt.md
