@@ -25,15 +25,27 @@ Manage handoffs with three subcommands: `save`, `restore`, `list`.
 
 ## Subcommand routing
 
-Parse the user's input:
+Parse the user's input in this priority order. Stop at the first match.
 
-- `/handoff` → **save** (no title — infer from conversation context)
-- `/handoff <title>` → **save** with the given title
-- `/handoff save [<title>]` → **save** (explicit form)
-- `/handoff restore [<id|n|fragment>]` → **restore** (default: latest matching current repo + branch; arg can be handoff id, numeric index, or title fragment)
-- `/handoff list [--all]` → **list** (default filter: current repo_root + branch; `--all` lifts BOTH filters)
+### 1. Explicit subcommand keyword
 
-If the first arg is none of the above keywords and looks like a title, treat as `save <title>`.
+- `/handoff save [<title>]` → **save**
+- `/handoff restore [<id|n|fragment>]` → **restore**
+- `/handoff list [--all]` → **list**
+
+### 2. Natural-language trigger phrase (read-only intent gets read-only flow)
+
+When the args (or the user's surrounding message) match a restore/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
+
+- Restore triggers: `resume`, `where was i`, `pick up where i left off`, `restore context`, `resume context`, `resume work`, `continue session`
+- List triggers: `list handoffs`, `what handoffs do i have`, `show handoffs`, `handoff list`
+
+Match case-insensitively against the first few words of args (or the user message if args are empty).
+
+### 3. Save defaults
+
+- `/handoff` (no args) → **save**, infer title from conversation
+- `/handoff <title>` (first arg not a keyword, not a restore/list trigger) → **save** with the given title
 
 ---
 
@@ -53,8 +65,11 @@ UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null ||
 STATUS_OUT=$(git status --porcelain=v2 --branch 2>/dev/null)
 DIRTY_FILES=$(echo "$STATUS_OUT" | awk '/^[12u?] /{print $NF}' | head -50)
 [ -n "$DIRTY_FILES" ] && DIRTY=true || DIRTY=false
-DIFF_STAT=$(git diff --stat 2>/dev/null | tail -30)
-DIFF_NAMES=$(git diff --name-status 2>/dev/null | head -50)
+# Use `git diff HEAD` (not bare `git diff`) so the Dirty Tree section captures
+# BOTH staged AND unstaged hunks. Bare `git diff` only shows unstaged — a fully
+# staged dirty tree would render as empty diff in the saved handoff.
+DIFF_STAT=$(git diff HEAD --stat 2>/dev/null | tail -30)
+DIFF_NAMES=$(git diff HEAD --name-status 2>/dev/null | head -50)
 WORKTREES=$(git worktree list --porcelain 2>/dev/null)
 WORKTREE_COUNT=$(echo "$WORKTREES" | awk '/^worktree /' | wc -l | tr -d ' ')
 # Detect sibling-worktree mode (git-common-dir != .git means we're in a worktree, not main repo).
