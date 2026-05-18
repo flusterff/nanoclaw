@@ -24,6 +24,18 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/precompact-handoff-reminder.sh",
+            "timeout": 1
+          }
+        ]
+      }
     ]
   }
 }
