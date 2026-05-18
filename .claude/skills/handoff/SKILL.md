@@ -22,7 +22,7 @@ allowed-tools:
 
 Manage handoffs with four subcommands: `save`, `restore`, `show`, `list`.
 
-**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only mutation, body untouched). Restore and show are strictly read-only; restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields (including any future `last_verified_at`).
+**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only mutation, body untouched), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only mutation, body untouched). Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore write is the `last_verified_at:` frontmatter write after the staleness probe; show is strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields.
 
 ## Subcommand routing
 
@@ -217,6 +217,7 @@ metadata:
   supersedes: [<id>, ...]
   status: in-progress           # one of: in-progress | shipped | abandoned | superseded
   saved_at: <ISO-8601>
+  last_verified_at: "<ISO-8601>"  # written only by restore after receipt render; omit on save/new files
   session_color: <color-or-null>
   source_session: claude         # or: codex-claude
   repo_root: <absolute path>
@@ -296,7 +297,7 @@ Print:
 
 ---
 
-## RESTORE flow (strict read-only — HARD GATE)
+## RESTORE flow (read-only receipt + metadata-only verification write — HARD GATE)
 
 ### Step 1: Find target
 
@@ -313,21 +314,48 @@ CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
 
 If no match in current `repo+branch` but matches exist elsewhere: print `No handoff for <repo>:<branch>. Run /handoff list --all to browse all handoffs.` and exit (no further action).
 
-### Step 2: Staleness probe (read-only)
+### Step 2: Staleness probe + restore-time verification write
 
 Compute:
 - **Branch check:** `saved.branch == CURRENT_BRANCH`?
 - **Head reachability:** is `saved.head` an ancestor of current HEAD? `git merge-base --is-ancestor <saved.head> HEAD 2>/dev/null`
 - **Dirty drift:** if `saved.dirty == true`, compare `saved.dirty_files` set to current `git status --porcelain` dirty file set + diff stat. Flag if changed.
 - **PR check:** if `saved.open_prs` non-empty and `gh` available, query `gh pr view <n> --json state`; flag any MERGED or CLOSED.
-- **Age:** `now - saved.saved_at`.
+- **Age basis:** read `saved.last_verified_at` first; if missing (v2.0 handoff), fall back to `saved.saved_at`.
+- **Age:** `now - age_basis`.
 
-Compute `last_verified_at = now()` (restore-time only; not written back to the saved file).
+Read the age basis before the restore-time write so old handoffs without `last_verified_at` degrade gracefully to the v2.0 `saved_at` behavior:
+
+```bash
+SAVED_AT=$(sed -n 's/^  saved_at: //p' "$HANDOFF_FILE" | head -1 | sed 's/^"//; s/"$//')
+LAST_VERIFIED_AT=$(sed -n 's/^  last_verified_at: //p' "$HANDOFF_FILE" | head -1 | sed 's/^"//; s/"$//')
+AGE_BASIS_AT=${LAST_VERIFIED_AT:-$SAVED_AT}
+```
 
 Verdict (compute, do NOT block on any verdict):
-- **FRESH** = age < 1 day AND branch matches AND head reachable AND (dirty file set matches if saved was dirty) AND all PRs open
+- **FRESH** = age < 1 day using `last_verified_at` when present, otherwise `saved_at`, AND branch matches AND head reachable AND (dirty file set matches if saved was dirty) AND all PRs open
 - **STALE** = age > 7 days OR head not reachable OR branch deleted
 - **WARN** = anything else
+
+After computing the verdict, compute `last_verified_at = now()` and write it back to the selected handoff frontmatter. Do this only in RESTORE, immediately before printing the Step 3 receipt header. Do NOT run this write in SHOW.
+
+```bash
+ISO_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+if sed -n '2,/^---$/p' "$HANDOFF_FILE" | grep -q '^  last_verified_at:'; then
+  sed -i.bak '2,/^---$/s/^  last_verified_at:.*$/  last_verified_at: "'"$ISO_NOW"'"/' "$HANDOFF_FILE"
+else
+  sed -i.bak '2,/^---$/s/^  saved_at:.*$/&\
+  last_verified_at: "'"$ISO_NOW"'"/' "$HANDOFF_FILE"
+fi
+rm -f "$HANDOFF_FILE.bak"
+last_verified_at="$ISO_NOW"
+```
+
+The sed range starts at line 2 so the opening `---` cannot close the range; it stops at the closing `---`. This mutates only frontmatter. Body content is untouched.
+
+Post-processor tolerance: `last_verified_at` is a double-quoted ISO-8601 string, never `null`. To verify, write `last_verified_at: "2026-05-18T01:00:00Z"` with the same sed pattern, allow/simulate the auto-memory post-processor rewrite, then confirm `sed -n 's/^  last_verified_at: //p' "$HANDOFF_FILE" | head -1` still returns the field. Frontmatter reordering or injected metadata is acceptable as long as the field survives and `sed -n 's/^  KEY: //p'` continues to read it.
+
+Concurrent restore note: do not add locking. Two parallel restores may race this sed write; last-write-wins is accepted because both timestamps are verification times seconds apart and the body is untouched.
 
 ### Step 3: Read-only restore receipt
 
@@ -488,7 +516,7 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 ## Cross-feature notes
 
 - **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; marks prior same-(repo+branch) in-progress handoffs as `superseded` (metadata-only mutation of `status:` field, body untouched).
-- **Restore** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only.
+- **Restore** writes only `last_verified_at:` to the selected handoff frontmatter after the staleness probe (metadata-only mutation, body untouched). It never writes to SYNC.md or MEMORY.md, never mutates the body, and never executes `first_action`.
 - **Show** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow.
 - **List** never writes anywhere. Print-only.
 
@@ -497,7 +525,7 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 - **F1:** Restore's option A prints first_action, never executes it. Execution requires a separate user turn.
 - **F2:** Default restore/show/list filter is `repo_root + branch`. Prevents NanoClaw/Dodami main-vs-main collision.
 - **F3:** Staleness probe includes dirty-drift comparison (saved vs current dirty file set + diff stat).
-- **F4:** `superseded` is in the status enum. Metadata-only mutation explicitly carved out from append-only rule.
+- **F4:** `superseded` is in the status enum. Metadata-only mutations (`status:` supersession and restore-time `last_verified_at:` writes) are explicitly carved out from the append-only rule. Concurrent restores may race on `last_verified_at`; last-write-wins is accepted because competing values are verification timestamps seconds apart and body content remains untouched.
 - **F5:** Coordination-relevant predicate defined explicitly with 5 conditions (active_step / files_planned / dirty / open_prs / next_owner≠self).
 - **F6:** `gh pr list` is fail-open: missing/unauth gh → `open_prs: []` + `open_prs_probe_note`, save never aborts.
 
@@ -507,4 +535,4 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 - **C2/C3/C4:** No Environment Hints / Resume Commands / Event Log body sections in v2.0. Deferred to v2.1 — each is cheaply addable as a single body section.
 - **C5:** Symbol Map is nested under Working Set (not a separate adopted feature).
 - **C6:** "Did NOT Do" merged into Open Loops `Drop / Did Not Do`.
-- **C7:** `last_verified_at` is computed at restore time, not stored in save frontmatter.
+- **C7:** v2.0 computed `last_verified_at` at restore time without storing it. v2.1 reverses this only for restore: `/handoff restore` writes `last_verified_at` back to frontmatter as a metadata-only mutation; `/handoff save` still never writes it, and `/handoff show` remains read-only/display-only.
