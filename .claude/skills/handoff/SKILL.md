@@ -1,15 +1,18 @@
 ---
 name: handoff
 description: |
-  Save / restore / show / replay / list cross-session handoffs. Captures git state, decisions,
-  working set, open loops + generates a copy-paste resume prompt. Symmetric restore/show/replay:
-  a fresh session runs /handoff restore to load a read-only receipt, /handoff show
-  to print that receipt plus the full body without a prompt, or /handoff replay
-  to print one Open Loops step plus focused saved context.
+  Save / restore / show / replay / rules / list cross-session handoffs. Captures git state,
+  decisions, working set, open loops + generates a copy-paste resume prompt.
+  Symmetric restore/show/replay plus rules surfacing: a fresh session runs /handoff restore
+  to load a read-only receipt, /handoff show to print that receipt plus the full body
+  without a prompt, /handoff replay to print one Open Loops step plus focused saved
+  context, or /handoff rules to surface repeated handoff patterns as print-only
+  CLAUDE.md rule proposals.
   Triggers on "handoff", "save and switch", "new session", "pick up later",
   "prepare handoff", "save progress for next session", "resume", "where was I",
   "restore context", "show handoff", "replay handoff", "replay step",
-  "list handoffs", "what handoffs do I have".
+  "list handoffs", "what handoffs do I have", "handoff rules", "propose rules",
+  "surface patterns", "what should I remember".
 allowed-tools:
   - Bash
   - Read
@@ -22,9 +25,9 @@ allowed-tools:
 
 # /handoff — Cross-Session Handoff (v2)
 
-Manage handoffs with five subcommands: `save`, `restore`, `show`, `replay`, `list`.
+Manage handoffs with six subcommands: `save`, `restore`, `show`, `replay`, `rules`, `list`.
 
-**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Explicit `/handoff save --stash` (or an explicit save-time `stash` keyword) is the only opt-in git mutation this skill may perform: when requested, SAVE may run `git stash push -u -m "handoff_<handoff_id>"` after capturing the dirty-tree capsule and before confirmation. This is a save-time side effect, not a restore-time action; it is never automatic, and restore/show only print a paste-ready `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` cue. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show and replay are strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines. Replay is SHOW-like, not RESTORE-like: it prints one selected Open Loops step plus relevant saved context, and does not write `last_verified_at`, append Event Log lines, mutate frontmatter, or call RESTORE's verification-write logic.
+**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Explicit `/handoff save --stash` (or an explicit save-time `stash` keyword) is the only opt-in git mutation this skill may perform: when requested, SAVE may run `git stash push -u -m "handoff_<handoff_id>"` after capturing the dirty-tree capsule and before confirmation. This is a save-time side effect, not a restore-time action; it is never automatic, and restore/show only print a paste-ready `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` cue. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show, replay, and rules are strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines. Replay is SHOW-like, not RESTORE-like: it prints one selected Open Loops step plus relevant saved context, and does not write `last_verified_at`, append Event Log lines, mutate frontmatter, or call RESTORE's verification-write logic. Rules scans recent handoff files and prints candidate CLAUDE.md rule additions only; it never writes CLAUDE.md, project CLAUDE.md, MEMORY.md, SYNC.md, handoff files, or any other rule file.
 
 ## Subcommand routing
 
@@ -36,9 +39,12 @@ Parse the user's input in this priority order. Stop at the first match.
 - `/handoff restore [<id|n|fragment>]` → **restore**
 - `/handoff show [<id|n|fragment>]` → **show**
 - `/handoff replay [<id|n|fragment>] [step=<N>|<fragment>]` → **replay**
+- `/handoff rules [--last=<N>]` → **rules**
 - `/handoff list [--all]` → **list**
 
 For SAVE only, `--stash` sets `STASH_REQUESTED=true`; `--delta` sets `DELTA_REQUESTED=true`; `--full` sets `FULL_REQUESTED=true`. Strip all recognized flags from the title before title inference. Defaults are `STASH_REQUESTED=false`, `DELTA_REQUESTED=false`, and `FULL_REQUESTED=false`; there is no `--no-stash`. If both `--delta` and `--full` are present, abort before Step 1 with a clear error because they are mutually exclusive.
+
+For RULES only, `--last=<N>` sets `RULES_LAST=<N>` after validating that `<N>` is a positive integer. Default is `RULES_LAST=30`. Strip `--last=<N>` before trigger matching. Do not accept flags that imply writes or installation; RULES is print-only.
 
 For REPLAY only, parse two selectors: `REPLAY_TARGET_SELECTOR` and `REPLAY_STEP_SELECTOR`. If no replay target is provided, use RESTORE Step 1's default newest current `repo_root + branch` target. If one token follows `replay`, treat it as the target selector and default `REPLAY_STEP_SELECTOR=1`. If two or more tokens follow `replay`, treat the first token as the target selector and the remaining text as the step selector. Accept both `step=<N|waiting|fragment>` and a bare step selector (`1`, `2`, `waiting`, or a fragment). Strip only the leading `step=` prefix from the step selector; target lookup still uses RESTORE Step 1.
 
@@ -46,13 +52,14 @@ For REPLAY only, parse two selectors: `REPLAY_TARGET_SELECTOR` and `REPLAY_STEP_
 
 ### 2. Natural-language trigger phrase (read-only intent gets read-only flow)
 
-When the args (or the user's surrounding message) match a restore/show/replay/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume", "show", or "replay" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
+When the args (or the user's surrounding message) match a restore/show/replay/rules/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume", "show", "replay", or "rules" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
 
-Evaluate exact multi-word triggers before bare `show` or bare `replay`, so `show handoffs` remains list while `show handoff` routes show, and `replay step <N> of <id>` routes replay with an extracted step selector.
+Evaluate exact multi-word triggers before bare `show`, bare `replay`, or bare `rules`, so `show handoffs` remains list while `show handoff` routes show, `replay step <N> of <id>` routes replay with an extracted step selector, and `what should I remember` routes rules.
 
 - Restore triggers: `resume`, `where was i`, `pick up where i left off`, `restore context`, `resume context`, `resume work`, `continue session`
 - Show triggers: `show`, `show handoff`, `handoff show`
 - Replay triggers: `replay`, `handoff replay`, `replay handoff`, `replay step`
+- Rules triggers: `rules`, `handoff rules`, `what should i remember`, `propose rules`, `surface patterns`
 - List triggers: `list handoffs`, `what handoffs do i have`, `show handoffs`, `handoff list`
 
 For natural-language replay forms, support at least:
@@ -64,12 +71,12 @@ If a replay phrase omits the step selector, default to `1`. If a replay phrase o
 
 Match case-insensitively against the first few words of args (or the user message if args are empty).
 
-Save-only modifiers: after routing resolves to SAVE, treat the explicit args `stash`, `with stash`, or `and stash` as `STASH_REQUESTED=true` and strip those words from the title before title inference. Delta/full mode is controlled only by exact flags `--delta` and `--full`; do not infer it from natural-language words. These modifiers do not override restore/show/list trigger matches. Do not ask an AskUserQuestion for stash capture or delta/full capture; the flag/default auto-detect surface is the entire opt-in surface.
+Save-only modifiers: after routing resolves to SAVE, treat the explicit args `stash`, `with stash`, or `and stash` as `STASH_REQUESTED=true` and strip those words from the title before title inference. Delta/full mode is controlled only by exact flags `--delta` and `--full`; do not infer it from natural-language words. These modifiers do not override restore/show/replay/rules/list trigger matches. Do not ask an AskUserQuestion for stash capture or delta/full capture; the flag/default auto-detect surface is the entire opt-in surface.
 
 ### 3. Save defaults
 
 - `/handoff` (no args) → **save**, infer title from conversation
-- `/handoff <title>` (first arg not a keyword, not a restore/list trigger) → **save** with the given title
+- `/handoff <title>` (first arg not a keyword, not a read-only trigger) → **save** with the given title
 
 ---
 
@@ -935,6 +942,263 @@ and exit.
 
 ---
 
+## RULES flow (strict read-only — HARD GATE)
+
+Purpose: surface repeated failure / friction / decision patterns from recent handoffs and print candidate CLAUDE.md rule additions. RULES never auto-writes to CLAUDE.md, project CLAUDE.md, MEMORY.md, SYNC.md, handoff files, or any rule file. The user manually copies any accepted draft.
+
+V1 intentionally uses keyword counting only. Do not use embeddings, Levenshtein distance, ML clustering, or scans outside the handoff directory.
+
+### Step 1: Collect handoff candidates
+
+Scan only `~/.claude/projects/-Users-will-nanoclaw/memory/handoff_*.md`. Default window is the last 30 handoffs by file mtime. `--last=<N>` overrides the window.
+
+```bash
+HANDOFF_DIR=~/.claude/projects/-Users-will-nanoclaw/memory
+: "${RULES_LAST:=30}"
+
+case "$RULES_LAST" in
+  ''|*[!0-9]*)
+    echo "ERROR: --last must be a positive integer"
+    exit 2
+    ;;
+esac
+if [ "$RULES_LAST" -le 0 ]; then
+  echo "ERROR: --last must be a positive integer"
+  exit 2
+fi
+
+ALL_HANDOFFS=$(find "$HANDOFF_DIR" -maxdepth 1 -name "handoff_*.md" -type f -print 2>/dev/null)
+if printf '%s\n' "$ALL_HANDOFFS" | grep -q .; then
+  CANDIDATES=$(printf '%s\n' "$ALL_HANDOFFS" | xargs ls -t 2>/dev/null | head -n "$RULES_LAST")
+else
+  CANDIDATES=""
+fi
+SCAN_COUNT=$(printf '%s\n' "$CANDIDATES" | grep -c . || true)
+```
+
+Do not apply a repo+branch filter by default; durable rules are user-workflow signals across recent handoffs. A future version may add an explicit filter, but V1 scans the recent handoff window as-is.
+
+### Step 2: Extract candidate items per handoff
+
+Extract exactly three signal types:
+
+1. `drop`: body `### Open Loops` → `**Drop / Did Not Do:**`
+2. `blocked_waiting`: body `### Open Loops` → `**Blocked:**` and `**Waiting:**`
+3. `do_not_do`: frontmatter `do_not_do:` list
+
+Use grep/sed/shell parsing only. Do not use awk positional fields or shell positional dollar-number args; the Skill renderer can clobber those before Bash sees them.
+
+```bash
+STOPWORDS='^(the|and|for|with|from|into|that|this|then|than|only|also|because|before|after|until|next|step|work|working|session|handoff|rule|rules|claude|codex|will|read|write|file|files|line|lines|drop|did|not|done|blocked|waiting|scope|user|repo|branch)$'
+
+keyword_key() {
+  text="$KEYWORD_TEXT"
+  keywords=$(
+    printf '%s\n' "$text" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr -cs '[:alnum:]_./#:-' '\n' \
+      | grep -E '.{3,}' \
+      | grep -Eiv "$STOPWORDS" \
+      | sort -u \
+      | head -5
+  )
+  keyword_count=$(printf '%s\n' "$keywords" | grep -c . || true)
+  [ "$keyword_count" -ge 3 ] || return 0
+  printf '%s\n' "$keywords" | paste -sd' ' -
+}
+
+emit_signal_item() {
+  signal="$EMIT_SIGNAL"
+  handoff_id="$EMIT_HANDOFF_ID"
+  item="$EMIT_ITEM"
+  cleaned=$(printf '%s\n' "$item" | tr '|' '/' | sed -E 's/^[[:space:]>*-]+//; s/[[:space:]]+$//')
+  [ -n "$cleaned" ] || return 0
+  key=$(KEYWORD_TEXT="$cleaned" keyword_key)
+  [ -n "$key" ] || return 0
+  printf '%s|%s|%s|%s\n' "$signal" "$key" "$handoff_id" "$cleaned"
+}
+
+extract_open_loop_label() {
+  file="$EXTRACT_FILE"
+  wanted="$EXTRACT_LABEL"
+  in_open=false
+  in_label=false
+
+  while IFS= read -r line; do
+    case "$line" in
+      "### Open Loops")
+        in_open=true
+        in_label=false
+        continue
+        ;;
+      "### "*)
+        if [ "$in_open" = true ]; then
+          break
+        fi
+        ;;
+    esac
+
+    [ "$in_open" = true ] || continue
+
+    case "$line" in
+      "**Waiting:**"*)
+        [ "$wanted" = waiting ] && in_label=true || in_label=false
+        continue
+        ;;
+      "**Blocked:**"*)
+        [ "$wanted" = blocked ] && in_label=true || in_label=false
+        continue
+        ;;
+      "**Drop / Did Not Do:**"*)
+        [ "$wanted" = drop ] && in_label=true || in_label=false
+        continue
+        ;;
+      "**"*)
+        in_label=false
+        continue
+        ;;
+    esac
+
+    [ "$in_label" = true ] || continue
+    printf '%s\n' "$line" \
+      | grep -E '^[[:space:]]*[-*] |^[[:space:]]*[0-9]+[.)] ' \
+      | sed -E 's/^[[:space:]]*[-*][[:space:]]+//; s/^[[:space:]]*[0-9]+[.)][[:space:]]+//'
+  done < "$file"
+}
+
+SIGNAL_ROWS=$(
+  for f in $CANDIDATES; do
+    H_ID=$(sed -n 's/^  handoff_id: //p' "$f" | head -1)
+    [ -n "$H_ID" ] || H_ID=$(basename "$f" .md | sed 's/^handoff_//')
+
+    sed -n '/^  do_not_do:/,/^  [A-Za-z_][A-Za-z0-9_]*:/p' "$f" \
+      | grep '^    - ' \
+      | sed 's/^    - //; s/^"//; s/"$//' \
+      | while IFS= read -r item; do
+          EMIT_SIGNAL=do_not_do EMIT_HANDOFF_ID="$H_ID" EMIT_ITEM="$item" emit_signal_item
+        done
+
+    EXTRACT_FILE="$f" EXTRACT_LABEL=waiting extract_open_loop_label \
+      | while IFS= read -r item; do
+          EMIT_SIGNAL=blocked_waiting EMIT_HANDOFF_ID="$H_ID" EMIT_ITEM="$item" emit_signal_item
+        done
+
+    EXTRACT_FILE="$f" EXTRACT_LABEL=blocked extract_open_loop_label \
+      | while IFS= read -r item; do
+          EMIT_SIGNAL=blocked_waiting EMIT_HANDOFF_ID="$H_ID" EMIT_ITEM="$item" emit_signal_item
+        done
+
+    EXTRACT_FILE="$f" EXTRACT_LABEL=drop extract_open_loop_label \
+      | while IFS= read -r item; do
+          EMIT_SIGNAL=drop EMIT_HANDOFF_ID="$H_ID" EMIT_ITEM="$item" emit_signal_item
+        done
+  done
+)
+```
+
+### Step 3: Count keyword occurrences across handoffs
+
+A pattern qualifies only when the same `signal + keyword_key` appears in at least 3 distinct handoffs. Do not propose a hard rule from one handoff, even if it repeats several times inside that handoff.
+
+```bash
+PATTERN_ROWS=$(
+  printf '%s\n' "$SIGNAL_ROWS" \
+    | while IFS='|' read -r signal key handoff_id item; do
+        [ -n "$signal" ] || continue
+        printf '%s|%s\n' "$signal" "$key"
+      done \
+    | sort \
+    | uniq -c \
+    | sort -rn \
+    | while read -r occurrence_count pattern; do
+        signal=$(printf '%s\n' "$pattern" | cut -d'|' -f1)
+        key=$(printf '%s\n' "$pattern" | cut -d'|' -f2-)
+
+        evidence_ids=$(
+          printf '%s\n' "$SIGNAL_ROWS" \
+            | while IFS='|' read -r row_signal row_key row_id row_item; do
+                if [ "$row_signal" = "$signal" ] && [ "$row_key" = "$key" ]; then
+                  printf '%s\n' "$row_id"
+                fi
+              done \
+            | sort -u
+        )
+        evidence_count=$(printf '%s\n' "$evidence_ids" | grep -c . || true)
+        [ "$evidence_count" -ge 3 ] || continue
+
+        evidence_csv=$(printf '%s\n' "$evidence_ids" | head -5 | paste -sd', ' -)
+        printf '%s|%s|%s|%s\n' "$occurrence_count" "$signal" "$key" "$evidence_csv"
+      done
+)
+```
+
+### Step 4: Render proposals
+
+Print a proposal block only. Each proposal includes pattern summary, evidence handoff IDs, and draft CLAUDE.md HARD RULE text. Keep drafts short enough for manual copy/paste.
+
+```bash
+PROPOSAL_COUNT=$(printf '%s\n' "$PATTERN_ROWS" | grep -c . || true)
+
+if [ "$PROPOSAL_COUNT" -gt 0 ]; then
+  printf 'Durable-rule candidates from %s handoffs scanned\n\n' "$SCAN_COUNT"
+
+  proposal_n=0
+  printf '%s\n' "$PATTERN_ROWS" \
+    | while IFS='|' read -r occurrence_count signal key evidence_csv; do
+        [ -n "$signal" ] || continue
+        proposal_n=$((proposal_n + 1))
+
+        case "$signal" in
+          drop)
+            signal_label="Drop / Did Not Do"
+            draft_title="Scope reduction: ${key}"
+            why_text="The same scope-reduction class appeared in 3 or more handoffs."
+            how_text="Before accepting similar work, check whether this scope class should be explicitly out of scope, deferred, or routed to a separate task."
+            ;;
+          blocked_waiting)
+            signal_label="Blocked / Waiting"
+            draft_title="Workflow blocker: ${key}"
+            why_text="The same blocker class appeared in 3 or more handoffs."
+            how_text="At task start, identify whether this blocker class is present; either clear it, name it in the pre-flight, or stop before implementation work depends on it."
+            ;;
+          do_not_do)
+            signal_label="Do not do"
+            draft_title="Do not do: ${key}"
+            why_text="The same do-not-do guidance appeared in 3 or more handoffs."
+            how_text="Treat this as a hard exclusion unless the user explicitly overrides it in the current turn; if overridden, record the waiver and scope."
+            ;;
+          *)
+            signal_label="$signal"
+            draft_title="Repeated handoff pattern: ${key}"
+            why_text="The same handoff pattern appeared in 3 or more handoffs."
+            how_text="Check for this pattern before starting similar work and make the decision explicit."
+            ;;
+        esac
+
+        printf '%s. Pattern: %s keywords `%s` (%s occurrences)\n' "$proposal_n" "$signal_label" "$key" "$occurrence_count"
+        printf '   Evidence: %s\n' "$evidence_csv"
+        printf '   Draft CLAUDE.md rule:\n'
+        printf '   **%s — HARD RULE**\n' "$draft_title"
+        printf '   Why: %s\n' "$why_text"
+        printf '   How to apply: %s\n\n' "$how_text"
+      done
+fi
+```
+
+### Step 5: Empty-result fallback
+
+If there are no qualifying patterns, print exactly:
+
+```bash
+if [ "$PROPOSAL_COUNT" -eq 0 ]; then
+  printf 'No durable-rule candidates surfaced from %s handoffs scanned. Need ≥3 recurring patterns to propose a rule.\n' "$SCAN_COUNT"
+fi
+```
+
+Then exit. Do not ask AskUserQuestion and do not write any file.
+
+---
+
 ## LIST flow
 
 ### Step 1: Collect candidates
@@ -1009,6 +1273,7 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 - **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop. Before printing the receipt, Restore inflates delta pointer sections through `parent_handoff` recursively up to 5 hops; if a parent is unreachable, it warns and prints the pointer line instead of failing. If present, Resume Commands, Environment Hints, and Event Log are printed from the resolved saved body only after the restore append completes. If successful `stash_ref` is present, restore prints `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` as a paste-ready cue in Resume Commands and does not verify or pop it.
 - **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the restore receipt plus the full saved body verbatim, optional Resume Commands, stash pop cue, Environment Hints, Event Log, and delta pointer lines surface naturally there too; Show does not resolve delta pointers.
 - **Replay** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, frontmatter, git, or anywhere else. Print-only; it is a SHOW-like focused read that reuses RESTORE Step 1 lookup only, filters saved `### Open Loops` to one Next item or the Waiting section, and prints terse saved context. Replay never writes `last_verified_at`, never appends a `restored` Event Log line, never resolves delta pointers through RESTORE, never asks AskUserQuestion, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop.
+- **Rules** never writes to SYNC.md, MEMORY.md, CLAUDE.md, project CLAUDE.md, the handoff file, the Event Log, frontmatter, git, or anywhere else. Print-only; it scans only recent `handoff_*.md` files in the handoff dir, counts simple shared-keyword patterns across Drop / Did Not Do, Blocked / Waiting, and frontmatter `do_not_do` entries, and prints candidate CLAUDE.md HARD RULE drafts for manual copy. Rules never proposes from fewer than 3 distinct handoffs, never uses embeddings/Levenshtein/ML, never asks AskUserQuestion, and never scans SYNC.md or MEMORY.md content.
 - **List** never writes anywhere. Print-only.
 - **Status marking** (`marked-shipped`, `marked-abandoned`) is an Event Log convention for explicit status-marking flows. Do not infer those events from MEMORY.md/SYNC.md prose; append them only when the handoff file's `status:` is explicitly changed to `shipped` or `abandoned`.
 
@@ -1024,6 +1289,7 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 - **F8:** Delta parent unreachable fallback is fail-open at restore time. If a section pointer references a missing/unreadable parent, missing section, missing `parent_handoff`, or a chain deeper than 5 hops, RESTORE prints a warning and shows the delta pointer line instead of blocking or inventing content. SHOW always prints pointer lines verbatim.
 - **F9:** Named stash creation is opt-in and fail-open. `/handoff save --stash` or explicit save-time stash keywords run `git stash push -u -m "handoff_<handoff_id>"` only when `DIRTY=true`; clean trees print `stash skipped — clean tree`. If git stash fails, capture stderr, write `stash_ref: "ERROR: <message>"` for audit, print `stash failed — save continued`, and continue writing the handoff/MEMORY/SYNC entries.
 - **F10:** Replay is read-only and SHOW-like, not RESTORE-like. It reuses RESTORE Step 1 lookup by reference, then reads saved body content and filters `### Open Loops`; it must never call RESTORE Step 2's `last_verified_at` write, append a `restored` Event Log line, mutate frontmatter, or execute the selected step.
+- **F11:** Rules is strictly print-only. It may read recent handoff files and print candidate CLAUDE.md HARD RULE drafts, but it must never auto-write those drafts to CLAUDE.md, project CLAUDE.md, MEMORY.md, SYNC.md, handoff files, or any other rule file. It must require evidence from at least 3 distinct handoffs before surfacing a proposal.
 
 ## Cuts applied (from codex simplicity review)
 
@@ -1036,3 +1302,4 @@ Replay-from-step is new v2.1 read-only functionality, not a reversal of a v2.0 c
 - **C5:** Symbol Map is nested under Working Set (not a separate adopted feature).
 - **C6:** "Did NOT Do" merged into Open Loops `Drop / Did Not Do`.
 - **C7:** v2.0 computed `last_verified_at` at restore time without storing it. v2.1 reverses this only for restore: `/handoff restore` writes `last_verified_at` back to frontmatter as a metadata-only mutation; `/handoff save` still never writes it, and `/handoff show` remains read-only/display-only.
+- **C8:** Generate-durable-rules is adopted only as `/handoff rules` V1: keyword counting over recent handoffs, threshold ≥3 distinct handoffs, print-only proposals, no embeddings/Levenshtein/ML, no scans outside the handoff dir, and no auto-writes to CLAUDE.md or any rule file.
