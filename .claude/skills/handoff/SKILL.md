@@ -151,6 +151,111 @@ Sections to include (omit any that are empty — never write empty headers):
   - Write commands, not paragraphs, as one fenced `bash` block. Commands are paste-ready and are printed later; they are never auto-executed by restore/show.
   - Do not capture secrets or secret-bearing command lines. If a needed command would include token/key values, write a `# <secret-redacted>` placeholder line instead.
   - Omit the entire section if no actionable resume commands are inferable.
+- `### Environment Hints`:
+  - Capture at SAVE time only. Restore/show print saved body content; they do not recompute environment hints and never auto-restore environment.
+  - Purpose: record runtime drift clues the work depended on: current `pwd`, project-used CLI versions and executable paths, and a tiny allowlisted env subset. This is body content, so frontmatter/YAML quoting rules do not apply.
+  - Tool versions: capture only tools the project actually uses, determined by repo evidence: package manifests (`package.json`, `pyproject.toml`, `Cargo.toml`), repo `bin/` or script files, tracked repo text, or recent commit messages. Do not dump every installed tool on the machine.
+  - Candidate tools are finite and explicit: `node`, `npm`, `pnpm`, `yarn`, `python`, `python3`, `pip`, `pip3`, `gh`, `codex`, `jq`, `docker`, `container`, `sqlite3`, `tsx`, `tsc`, `vitest`, `pytest`, `cargo`, `rustc`, `go`, `make`. Emit a tool only if repo evidence says it is used AND `command -v <tool>` succeeds.
+  - Env allowlist, before the banlist: exactly `PATH`, `SHELL`, `USER`, `HOME`, `TERM`, `LANG`, `LC_*`, `NODE_ENV`, `PYTHON_VERSION`, `GH_REPO`, `DODAMI_DEBUG`, `DODAMI_DRY_RUN`, `DODAMI_ENV`, and `DODAMI_*_(FLAG|FLAGS|FEATURE|FEATURES|TOGGLE|ENABLED|DISABLED|MODE)`.
+  - `PATH` is allowed only as a source for `command -v` tool path hints; never print the raw full `$PATH` value. In the env block, render it as `PATH=<omitted; tool paths captured above>`.
+  - Banlist is case-insensitive and wins over the allowlist: never capture any env variable whose name matches `KEY|TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL|AUTH`.
+  - Omit the entire section if synthesis fails or yields no `pwd`, tool, or safe env hints.
+
+  Inline capture pattern:
+
+  ```bash
+  ENV_ALLOW_RE='^(PATH|SHELL|USER|HOME|TERM|LANG|LC_[A-Z0-9_]*|NODE_ENV|PYTHON_VERSION|GH_REPO|DODAMI_(DEBUG|DRY_RUN|ENV)|DODAMI_[A-Z0-9_]+_(FLAG|FLAGS|FEATURE|FEATURES|TOGGLE|ENABLED|DISABLED|MODE))='
+  ENV_BAN_RE='^[^=]*(KEY|TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL|AUTH)[^=]*='
+
+  SAFE_ENV_LINES=$(
+    env \
+      | LC_ALL=C grep -E "$ENV_ALLOW_RE" \
+      | LC_ALL=C grep -Eiv "$ENV_BAN_RE" \
+      | while IFS= read -r line; do
+          case "$line" in
+            PATH=*) printf '%s\n' 'PATH=<omitted; tool paths captured above>' ;;
+            *) printf '%s\n' "$line" ;;
+          esac
+        done
+  )
+
+  project_uses_tool() {
+    tool="$1"
+
+    # Codex review P2 fold: require tool-SPECIFIC evidence, not just
+    # "package.json exists". A repo using npm shouldn't surface pnpm/yarn
+    # versions just because `package.json` is present.
+    case "$tool" in
+      node|npm|npx)
+        [ -f "$REPO_ROOT/package.json" ] && return 0
+        ;;
+      pnpm)
+        [ -f "$REPO_ROOT/pnpm-lock.yaml" ] && return 0
+        ;;
+      yarn)
+        [ -f "$REPO_ROOT/yarn.lock" ] && return 0
+        ;;
+      tsx|tsc|vitest)
+        # Require explicit reference in package.json (script or dependency)
+        [ -f "$REPO_ROOT/package.json" ] && LC_ALL=C grep -q "\"$tool\"" "$REPO_ROOT/package.json" 2>/dev/null && return 0
+        ;;
+      python|python3|pip|pip3)
+        [ -f "$REPO_ROOT/pyproject.toml" ] || [ -f "$REPO_ROOT/requirements.txt" ] || find "$REPO_ROOT" -maxdepth 3 -name '*.py' -print -quit 2>/dev/null | grep -q . && return 0
+        ;;
+      pytest)
+        # Require explicit pytest config or fixture rather than any .py file
+        { [ -f "$REPO_ROOT/pyproject.toml" ] && LC_ALL=C grep -q "pytest" "$REPO_ROOT/pyproject.toml" 2>/dev/null; } || [ -f "$REPO_ROOT/pytest.ini" ] || [ -f "$REPO_ROOT/conftest.py" ] && return 0
+        ;;
+      cargo|rustc)
+        [ -f "$REPO_ROOT/Cargo.toml" ] && return 0
+        ;;
+    esac
+
+    find "$REPO_ROOT/bin" "$REPO_ROOT/scripts" -maxdepth 2 -type f \( -name "$tool" -o -path "*/bin/$tool" \) -print -quit 2>/dev/null | grep -q . && return 0
+    # Exclude the handoff skill's own prose (which lists every candidate
+    # tool) from the fallback grep — otherwise `go`/`make`/etc would always
+    # match.
+    git -C "$REPO_ROOT" grep -I -q -E "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" -- ':!node_modules' ':!.git' ':!.claude/skills/handoff/SKILL.md' 2>/dev/null && return 0
+    git -C "$REPO_ROOT" log --all --format=%s --max-count=200 2>/dev/null | LC_ALL=C grep -Eiq "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" && return 0
+    return 1
+  }
+
+  capture_tool_version() {
+    tool="$1"
+    label="$2"
+
+    project_uses_tool "$tool" || return 0
+    command -v "$tool" >/dev/null 2>&1 || return 0
+    tool_path=$(command -v "$tool" 2>/dev/null)
+    version=$("$tool" --version 2>/dev/null | head -1)
+    [ -n "$version" ] && printf -- '- %s: %s (%s)\n' "$label" "$version" "$tool_path"
+  }
+
+  TOOL_HINTS=$(
+    capture_tool_version node Node
+    capture_tool_version npm npm
+    capture_tool_version pnpm pnpm
+    capture_tool_version yarn yarn
+    capture_tool_version python Python
+    capture_tool_version python3 "Python 3"
+    capture_tool_version pip pip
+    capture_tool_version pip3 pip3
+    capture_tool_version gh gh
+    capture_tool_version codex codex
+    capture_tool_version jq jq
+    capture_tool_version docker docker
+    capture_tool_version container container
+    capture_tool_version sqlite3 sqlite3
+    capture_tool_version tsx tsx
+    capture_tool_version tsc tsc
+    capture_tool_version vitest vitest
+    capture_tool_version pytest pytest
+    capture_tool_version cargo cargo
+    capture_tool_version rustc rustc
+    capture_tool_version go go
+    capture_tool_version make make
+  )
+  ```
 - `### Open Loops`:
   - **Next:** concrete next actions (1-3)
   - **Waiting:** depends-on-external (PR / deploy / codex consult / Will)
@@ -365,7 +470,7 @@ Concurrent restore note: do not add locking. Two parallel restores may race this
 
 ### Step 3: Read-only restore receipt
 
-Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands`, print that section after Working set and before Open loops as a separate fenced `bash` block. If the section is absent, omit the `Resume Commands` label and code block entirely.
+Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands`, print that section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. If the section is absent, omit the `Resume Commands` label and code block entirely. If the saved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely.
 
 ````
 RESUMING HANDOFF <handoff_id>
@@ -392,6 +497,13 @@ Resume Commands (paste to wake this work up):
 ```bash
 <resume_commands verbatim>
 ```
+
+Environment Hints:
+  Pwd:                 <saved pwd>
+  Tools:
+    - <tool>: <version> (<path from command -v>)
+  Env (allowlist):
+    - <NAME>=<value or PATH omitted marker>
 
 Open loops:
   Next:                <items>
@@ -526,9 +638,9 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 
 ## Cross-feature notes
 
-- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; marks prior same-(repo+branch) in-progress handoffs as `superseded` (metadata-only mutation of `status:` field, body untouched). Save is the only flow that authors handoff body content: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance; the body-untouched restriction applies to later metadata-only operations and read-only flows.
-- **Restore** writes only `last_verified_at:` to the selected handoff frontmatter after the staleness probe (metadata-only mutation, body untouched). It never writes to SYNC.md or MEMORY.md, never mutates the body, and never executes `first_action` or Resume Commands. If present, Resume Commands are printed as a paste-ready fenced block only.
-- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the full saved body, optional Resume Commands surface naturally there too.
+- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; marks prior same-(repo+branch) in-progress handoffs as `superseded` (metadata-only mutation of `status:` field, body untouched). Save is the only flow that authors handoff body content: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance; the body-untouched restriction applies to later metadata-only operations and read-only flows. Optional Environment Hints are save-time body content, so no new HARD GATE exception is needed.
+- **Restore** writes only `last_verified_at:` to the selected handoff frontmatter after the staleness probe (metadata-only mutation, body untouched). It never writes to SYNC.md or MEMORY.md, never mutates the body, and never executes `first_action`, Resume Commands, or Environment Hints. If present, Resume Commands and Environment Hints are printed from the saved body only.
+- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the full saved body, optional Resume Commands and Environment Hints surface naturally there too.
 - **List** never writes anywhere. Print-only.
 
 ## Failure modes covered (from codex rigor review)
@@ -543,7 +655,8 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 ## Cuts applied (from codex simplicity review)
 
 - **C1:** v2.0 cut `/handoff show` because restore option B existed; v2.1 reverses this as a read-only, no-AUQ top-level flow for zero-friction body reads.
-- **C2/C4:** No Environment Hints / Event Log body sections yet. Still deferred to later v2.1 PRs.
+- **C2:** Environment Hints is now adopted as an optional save-time body section. Restore/show print saved hints only; they never recompute or restore environment.
+- **C4:** Event Log body section remains deferred to a later v2.1 PR.
 - **C3:** Resume Commands is now adopted as an optional save-time body section. Restore/show print those commands only; they never execute them.
 - **C5:** Symbol Map is nested under Working Set (not a separate adopted feature).
 - **C6:** "Did NOT Do" merged into Open Loops `Drop / Did Not Do`.
