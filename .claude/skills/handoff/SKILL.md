@@ -30,12 +30,12 @@ Parse the user's input in this priority order. Stop at the first match.
 
 ### 1. Explicit subcommand keyword
 
-- `/handoff save [--stash] [<title>]` → **save**
+- `/handoff save [--stash] [--delta|--full] [<title>]` → **save**
 - `/handoff restore [<id|n|fragment>]` → **restore**
 - `/handoff show [<id|n|fragment>]` → **show**
 - `/handoff list [--all]` → **list**
 
-For SAVE only, `--stash` sets `STASH_REQUESTED=true` and is stripped from the title before title inference. Default is `STASH_REQUESTED=false`; there is no `--no-stash`.
+For SAVE only, `--stash` sets `STASH_REQUESTED=true`; `--delta` sets `DELTA_REQUESTED=true`; `--full` sets `FULL_REQUESTED=true`. Strip all recognized flags from the title before title inference. Defaults are `STASH_REQUESTED=false`, `DELTA_REQUESTED=false`, and `FULL_REQUESTED=false`; there is no `--no-stash`. If both `--delta` and `--full` are present, abort before Step 1 with a clear error because they are mutually exclusive.
 
 **Exception (codex review P3 fold):** `/handoff show handoffs` (plural noun, no other args) routes to **list**, NOT show. Check this before treating `handoffs` as a fragment selector. The multi-word list trigger takes precedence over the `show + arg` shape so that the legacy v2.0 phrase remains valid.
 
@@ -51,7 +51,7 @@ Evaluate exact multi-word triggers before bare `show`, so `show handoffs` remain
 
 Match case-insensitively against the first few words of args (or the user message if args are empty).
 
-Save-only stash modifiers: after routing resolves to SAVE, treat the explicit args `stash`, `with stash`, or `and stash` as `STASH_REQUESTED=true` and strip those words from the title before title inference. These modifiers do not override restore/show/list trigger matches. Do not ask an AskUserQuestion for stash capture; the flag/keyword is the entire opt-in surface.
+Save-only modifiers: after routing resolves to SAVE, treat the explicit args `stash`, `with stash`, or `and stash` as `STASH_REQUESTED=true` and strip those words from the title before title inference. Delta/full mode is controlled only by exact flags `--delta` and `--full`; do not infer it from natural-language words. These modifiers do not override restore/show/list trigger matches. Do not ask an AskUserQuestion for stash capture or delta/full capture; the flag/default auto-detect surface is the entire opt-in surface.
 
 ### 3. Save defaults
 
@@ -145,9 +145,102 @@ Skip this step entirely if:
 
 Otherwise, ONE AskUserQuestion: "Anything the new session must preserve that I might miss?" with a free-text field plus a skip option. The answer may override synthesized fields, including Resume Commands; do not add a second question for resume-command capture. It must not set or unset stash behavior; stash is controlled only by the explicit `--stash` flag or save-time stash keywords. Cap friction at ~30s.
 
+### Step 2.5: Decide delta vs full save mode
+
+Delta mode is section-level only. It never writes line diffs or word diffs. It is enabled when:
+- `--delta` was passed and an eligible same-`repo_root` + same-`branch` parent exists, regardless of age.
+- OR default auto-detect finds an eligible parent saved less than 24 hours ago.
+- `--full` was passed → force full save and skip parent lookup for delta purposes.
+
+Eligible parent status is `in-progress` or `superseded` only. If `--delta` is explicit and no eligible parent exists, abort before writing anything and tell the user to rerun with `--full` for a full save. If auto-detect finds no eligible recent parent, continue as a full save.
+
+```bash
+# DELTA_REQUESTED and FULL_REQUESTED are set by Subcommand routing.
+: "${DELTA_REQUESTED:=false}"
+: "${FULL_REQUESTED:=false}"
+
+HANDOFF_DIR=~/.claude/projects/-Users-will-nanoclaw/memory
+DELTA_MODE=false
+DELTA_PARENT_ID=""
+DELTA_PARENT_FILE=""
+DELTA_NOTE="full save"
+
+delta_saved_age_seconds() {
+  python3 -c 'from datetime import datetime, timezone
+import os, sys
+ts = os.environ.get("P_SAVED_AT", "").strip().strip("\"")
+if not ts:
+    sys.exit(1)
+try:
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+except Exception:
+    sys.exit(1)
+print(int((datetime.now(timezone.utc) - dt).total_seconds()))' 2>/dev/null
+}
+
+find_delta_parent() {
+  for f in $(find "$HANDOFF_DIR" -maxdepth 1 -name "handoff_*.md" -type f 2>/dev/null | sort -r); do
+    P_REPO=$(sed -n 's/^  repo_root: //p' "$f" | head -1)
+    P_BRANCH=$(sed -n 's/^  branch: //p' "$f" | head -1)
+    P_STATUS=$(sed -n 's/^  status: //p' "$f" | head -1)
+    P_ID=$(sed -n 's/^  handoff_id: //p' "$f" | head -1)
+    P_SAVED_AT=$(sed -n 's/^  saved_at: //p' "$f" | head -1)
+
+    [ "$P_REPO" = "$REPO_ROOT" ] || continue
+    [ "$P_BRANCH" = "$BRANCH" ] || continue
+    # Codex review P2 fold: if newest matching handoff is shipped/abandoned,
+    # STOP — do NOT continue to older superseded handoffs (would silently
+    # delta against stale completed work). Terminal newest match = no delta
+    # parent eligible.
+    case "$P_STATUS" in
+      in-progress|superseded) ;;
+      shipped|abandoned) return 1 ;;
+      *) continue ;;
+    esac
+    [ -n "$P_ID" ] || continue
+
+    # Auto-detect requires <24h. Explicit --delta ignores age but still
+    # requires same repo+branch and an eligible status.
+    if [ "$DELTA_REQUESTED" != true ]; then
+      P_AGE_SECONDS=$(P_SAVED_AT="$P_SAVED_AT" delta_saved_age_seconds) || continue
+      [ "$P_AGE_SECONDS" -ge 0 ] && [ "$P_AGE_SECONDS" -lt 86400 ] || continue
+    fi
+
+    DELTA_PARENT_ID="$P_ID"
+    DELTA_PARENT_FILE="$f"
+    return 0
+  done
+  return 1
+}
+
+if [ "$FULL_REQUESTED" = true ]; then
+  DELTA_MODE=false
+  DELTA_NOTE="full save requested via --full"
+elif find_delta_parent; then
+  DELTA_MODE=true
+  DELTA_NOTE="delta save against parent_handoff=${DELTA_PARENT_ID}"
+elif [ "$DELTA_REQUESTED" = true ]; then
+  echo "ERROR: --delta requested but no same repo+branch parent handoff with status in-progress or superseded was found; rerun with --full for a full save."
+  exit 2
+else
+  DELTA_MODE=false
+  DELTA_NOTE="full save; no eligible <24h parent"
+fi
+```
+
+When `DELTA_MODE=true`, Step 5 must write `parent_handoff: <DELTA_PARENT_ID>` in frontmatter. When `DELTA_MODE=false`, omit `parent_handoff` unless another feature intentionally records non-delta lineage.
+
 ### Step 3: Synthesize body sections from conversation context
 
 Sections to include (omit any that are empty — never write empty headers, except `### Event Log` which is always present because SAVE writes the initial `created` event):
+
+Delta save rule: synthesize the would-be full content for every section first, then compare each eligible section's synthesized content against the parent's same section content as raw strings. Do not normalize whitespace and do not compute line/word diffs. If the section is identical, write the section header and exactly one pointer line, with no other content under that header:
+
+`<see parent_handoff: <parent-id> for unchanged <section-name>>`
+
+Eligible for delta omission: `### Decisions Made`, `### Working Set`, `### Resume Commands`, `### Environment Hints`, `### Dirty Tree`, `### Worktree Map`.
+
+Always write full: `### Summary`, `### Open Loops`, `### Event Log`, and the `## Working on: <title>` line. If the parent section is missing or unreadable at save time, write the new section content in full.
 
 - `## Working on: <title>` + `### Summary` (1-3 sentences)
 - `### Decisions Made` — bullets with "why" each
@@ -420,7 +513,7 @@ description: "<one-line for MEMORY.md index — ALWAYS DOUBLE-QUOTED>"
 type: handoff
 metadata:
   handoff_id: <timestamp>_<branch-slug>
-  parent_handoff: <previous-handoff-id>  # omit field entirely if no parent (do NOT write `null`)
+  parent_handoff: <parent-handoff-id>  # delta saves: required and used to resolve pointer lines; full saves: optional lineage only; omit if no parent (do NOT write `null`)
   supersedes: [<id>, ...]
   status: in-progress           # one of: in-progress | shipped | abandoned | superseded
   saved_at: <ISO-8601>
@@ -599,7 +692,13 @@ Concurrent restore note: do not add locking. Two parallel restores may race the 
 
 ### Step 3: Read-only restore receipt
 
-Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands` OR frontmatter has a successful `stash_ref` (present and not starting with `ERROR:`), print the Resume Commands section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. Print saved resume commands verbatim first, then append `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` when `stash_ref` is successful. If `stash_ref` starts with `ERROR:`, print one non-code line `Stash: creation failed during save — <stash_ref>` and do not print a pop command. If there are no saved resume commands and no successful stash_ref, omit the `Resume Commands` label and code block entirely. If the saved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely. If the saved body contains `### Event Log`, print that section after Open loops and before First action; because RESTORE appends the `restored` line before receipt rendering, the receipt includes the current restore event. If the section is absent on an older handoff and append failed, omit the `Event Log` label rather than synthesizing lines.
+Before rendering the receipt, resolve delta pointer lines for RESTORE only. A section is delta-omitted when its first content line is exactly:
+
+`<see parent_handoff: <parent-id> for unchanged <section-name>>`
+
+For those sections, locate the parent by scanning handoff frontmatter for `handoff_id == <parent-id>` (do not assume filename equals id), read the same section from that parent, and substitute the parent's section content into the restore receipt. If the parent section is itself a pointer, follow the chain one parent at a time. Bound recursion at `MAX_DELTA_HOPS=5`; if the limit is reached, leave the pointer line in place and print `(parent unreachable: recursion limit reached while resolving <section-name>)` under that section. If `parent_handoff` is missing, the parent id cannot be found, or the parent file is unreadable, leave the pointer line in place and print `(parent unreachable: <parent-id>; showing delta pointer)` under that section. SHOW does not run this inflation step.
+
+Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the resolved body contains `### Resume Commands` OR frontmatter has a successful `stash_ref` (present and not starting with `ERROR:`), print the Resume Commands section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. Print resolved saved resume commands verbatim first, then append `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` when `stash_ref` is successful. If `stash_ref` starts with `ERROR:`, print one non-code line `Stash: creation failed during save — <stash_ref>` and do not print a pop command. If there are no saved resume commands and no successful stash_ref, omit the `Resume Commands` label and code block entirely. If the resolved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely. If the saved body contains `### Event Log`, print that section after Open loops and before First action; because RESTORE appends the `restored` line before receipt rendering, the receipt includes the current restore event. Event Log is always written full and is never resolved through delta pointers. If the section is absent on an older handoff and append failed, omit the `Event Log` label rather than synthesizing lines.
 
 ````
 RESUMING HANDOFF <handoff_id>
@@ -705,7 +804,7 @@ After the receipt header, print:
 --- End handoff ---
 ```
 
-Read the selected handoff file and print the body exactly as saved. Do not ask A/B/C. Do not call Edit/Write. Do not perform shell mutations (`sed -i`, redirects to files, temp-file writes, status updates) and do not make external API calls beyond optional read-only `gh pr view` from the staleness probe.
+Read the selected handoff file and print the body exactly as saved, including any delta pointer lines like `<see parent_handoff: <id> for unchanged <section-name>>`. Delta resolution is RESTORE's job; SHOW is a raw inspection flow. Do not ask A/B/C. Do not call Edit/Write. Do not perform shell mutations (`sed -i`, redirects to files, temp-file writes, status updates) and do not make external API calls beyond optional read-only `gh pr view` from the staleness probe.
 
 ---
 
@@ -779,9 +878,9 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 
 ## Cross-feature notes
 
-- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. Later body writes are limited to append-only Event Log lines. If and only if `STASH_REQUESTED=true`, Save may additionally run the opt-in git mutation `git stash push -u -m "handoff_<handoff_id>"` after dirty capture; this is explicitly carved into the HARD GATE because it mutates git stash state and cleans the working tree.
-- **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop. If present, Resume Commands, Environment Hints, and Event Log are printed from the saved body only after the restore append completes. If successful `stash_ref` is present, restore prints `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` as a paste-ready cue in Resume Commands and does not verify or pop it.
-- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the restore receipt plus the full saved body, optional Resume Commands, stash pop cue, Environment Hints, and Event Log surface naturally there too.
+- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. In delta mode, Save still writes a complete new handoff file, but eligible unchanged sections may contain only the parseable pointer line `<see parent_handoff: <id> for unchanged <section-name>>`; `parent_handoff` carries the chain for restore-time inflation. Later body writes are limited to append-only Event Log lines. If and only if `STASH_REQUESTED=true`, Save may additionally run the opt-in git mutation `git stash push -u -m "handoff_<handoff_id>"` after dirty capture; this is explicitly carved into the HARD GATE because it mutates git stash state and cleans the working tree.
+- **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop. Before printing the receipt, Restore inflates delta pointer sections through `parent_handoff` recursively up to 5 hops; if a parent is unreachable, it warns and prints the pointer line instead of failing. If present, Resume Commands, Environment Hints, and Event Log are printed from the resolved saved body only after the restore append completes. If successful `stash_ref` is present, restore prints `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` as a paste-ready cue in Resume Commands and does not verify or pop it.
+- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the restore receipt plus the full saved body verbatim, optional Resume Commands, stash pop cue, Environment Hints, Event Log, and delta pointer lines surface naturally there too; Show does not resolve delta pointers.
 - **List** never writes anywhere. Print-only.
 - **Status marking** (`marked-shipped`, `marked-abandoned`) is an Event Log convention for explicit status-marking flows. Do not infer those events from MEMORY.md/SYNC.md prose; append them only when the handoff file's `status:` is explicitly changed to `shipped` or `abandoned`.
 
@@ -794,7 +893,8 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 - **F5:** Coordination-relevant predicate defined explicitly with 5 conditions (active_step / files_planned / dirty / open_prs / next_owner≠self).
 - **F6:** `gh pr list` is fail-open: missing/unauth gh → `open_prs: []` + `open_prs_probe_note`, save never aborts.
 - **F7:** Event Log is append-only body content. SAVE, RESTORE, supersession, and explicit status-marking flows may append lines; they must never edit, delete, sort, deduplicate, truncate, or rewrite existing Event Log lines. If the section is missing, create `### Event Log` at the bottom with `cat >> "$HANDOFF_FILE" <<EOF`; if it exists, append the new line at the bottom. SHOW and LIST must never write Event Log lines.
-- **F8:** Named stash creation is opt-in and fail-open. `/handoff save --stash` or explicit save-time stash keywords run `git stash push -u -m "handoff_<handoff_id>"` only when `DIRTY=true`; clean trees print `stash skipped — clean tree`. If git stash fails, capture stderr, write `stash_ref: "ERROR: <message>"` for audit, print `stash failed — save continued`, and continue writing the handoff/MEMORY/SYNC entries.
+- **F8:** Delta parent unreachable fallback is fail-open at restore time. If a section pointer references a missing/unreadable parent, missing section, missing `parent_handoff`, or a chain deeper than 5 hops, RESTORE prints a warning and shows the delta pointer line instead of blocking or inventing content. SHOW always prints pointer lines verbatim.
+- **F9:** Named stash creation is opt-in and fail-open. `/handoff save --stash` or explicit save-time stash keywords run `git stash push -u -m "handoff_<handoff_id>"` only when `DIRTY=true`; clean trees print `stash skipped — clean tree`. If git stash fails, capture stderr, write `stash_ref: "ERROR: <message>"` for audit, print `stash failed — save continued`, and continue writing the handoff/MEMORY/SYNC entries.
 
 ## Cuts applied (from codex simplicity review)
 
