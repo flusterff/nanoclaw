@@ -22,7 +22,7 @@ allowed-tools:
 
 Manage handoffs with four subcommands: `save`, `restore`, `show`, `list`.
 
-**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only mutation, body untouched), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only mutation, body untouched). Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore write is the `last_verified_at:` frontmatter write after the staleness probe; show is strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields.
+**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show is strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines.
 
 ## Subcommand routing
 
@@ -137,7 +137,7 @@ Otherwise, ONE AskUserQuestion: "Anything the new session must preserve that I m
 
 ### Step 3: Synthesize body sections from conversation context
 
-Sections to include (omit any that are empty — never write empty headers):
+Sections to include (omit any that are empty — never write empty headers, except `### Event Log` which is always present because SAVE writes the initial `created` event):
 
 - `## Working on: <title>` + `### Summary` (1-3 sentences)
 - `### Decisions Made` — bullets with "why" each
@@ -263,10 +263,41 @@ Sections to include (omit any that are empty — never write empty headers):
   - **Drop / Did Not Do:** intentionally not migrating OR scope decisions, one-line `why` each
 - `### Dirty Tree` (only if `DIRTY=true`): porcelain v2 output + diff stat + per-file intent line (`why dirty? commit? stash? leave?`)
 - `### Worktree Map` (only if `WORKTREE_COUNT > 1`): abbreviated `git worktree list --porcelain` + identified collision risks
+- `### Event Log`:
+  - Always place this LAST in the body, after Dirty Tree and after Worktree Map. If Dirty Tree or Worktree Map is omitted, Event Log is still the final body section.
+  - Event lines are markdown body content after the closing frontmatter `---`, never YAML.
+  - Format every line as `<ISO-8601> <event-name> <terse-context>`, with context as parseable `key=value` tokens and no prose sentences. Examples:
+    - `2026-05-18T01:00:00Z created session=red source=codex-claude`
+    - `2026-05-18T01:30:00Z restored session=red staleness=FRESH last_verified_at=2026-05-18T01:30:00Z`
+    - `2026-05-18T02:00:00Z superseded by=20260518-020000_main`
+  - On SAVE, write the initial line as `<saved_at> created session=<SESSION_COLOR> source=<SOURCE_SESSION>`.
+  - Canonical event names: `created`, `superseded`, `restored`, `last-verified-at-confirmed`, `marked-shipped`, `marked-abandoned`.
+  - Append-only invariant: once an Event Log line is written, never edit, delete, sort, deduplicate, or rewrite it. Later flows append new lines at the bottom only. SHOW and LIST never write Event Log lines.
 
-### Step 4: Compute supersession (metadata-only mutation)
+### Step 4: Compute supersession (frontmatter mutation + append-only Event Log write)
 
 ```bash
+# Append a lifecycle event to a handoff body. This helper never edits or deletes
+# existing body content. If an older handoff lacks the section, create the
+# section at the bottom, then append the event line.
+append_handoff_event() {
+  handoff_file="$1"
+  event_line="$2"
+
+  if grep -q '^### Event Log$' "$handoff_file"; then
+    cat >> "$handoff_file" <<EOF
+$event_line
+EOF
+  else
+    cat >> "$handoff_file" <<EOF
+
+### Event Log
+
+$event_line
+EOF
+  fi
+}
+
 # Find prior in-progress handoffs on the same repo_root + branch.
 #
 # IMPORTANT: parse frontmatter with `sed -n 's/^  KEY: //p' | head -1`, NOT awk.
@@ -277,6 +308,7 @@ Sections to include (omit any that are empty — never write empty headers):
 # (Bug verified during 2026-05-17 dogfood — see SYNC.md follow-up note.)
 PRIOR=$(find ~/.claude/projects/-Users-will-nanoclaw/memory -maxdepth 1 -name "handoff_*.md" -type f 2>/dev/null)
 SUPERSEDES=()
+SUPERSEDE_FILES=()
 for f in $PRIOR; do
   P_REPO=$(sed -n 's/^  repo_root: //p' "$f" | head -1)
   P_BRANCH=$(sed -n 's/^  branch: //p' "$f" | head -1)
@@ -284,14 +316,29 @@ for f in $PRIOR; do
   P_ID=$(sed -n 's/^  handoff_id: //p' "$f" | head -1)
   if [ "$P_REPO" = "$REPO_ROOT" ] && [ "$P_BRANCH" = "$BRANCH" ] && [ "$P_STATUS" = "in-progress" ]; then
     SUPERSEDES+=("$P_ID")
-    # Metadata-only update on the prior handoff: rewrite `  status: in-progress` →
-    # `  status: superseded`. Body untouched. Use `sed -i.bak` for atomic in-place edit,
-    # then rm the backup. Operates only on the frontmatter block.
+    SUPERSEDE_FILES+=("$f")
   fi
+done
+
+# Run after HANDOFF_ID has been computed from the same timestamp + slug used for
+# the new handoff path in Step 5.
+: "${HANDOFF_ID:?set HANDOFF_ID before applying supersession}"
+ISO_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+for i in "${!SUPERSEDES[@]}"; do
+  prior_id="${SUPERSEDES[$i]}"
+  prior_file="${SUPERSEDE_FILES[$i]}"
+
+  # Frontmatter-only status mutation on the prior handoff.
+  sed -i.bak '2,/^---$/s/^  status: in-progress$/  status: superseded/' "$prior_file"
+  rm -f "$prior_file.bak"
+
+  # Body mutation is limited to an append-only Event Log line.
+  append_handoff_event "$prior_file" "$ISO_NOW superseded by=$HANDOFF_ID"
 done
 ```
 
-For each prior handoff in `SUPERSEDES`: edit its frontmatter `status:` field to `superseded`. Body lines untouched. MEMORY.md entry for that handoff: prepend `[SUPERSEDED]` tag.
+For each prior handoff in `SUPERSEDES`: edit its frontmatter `status:` field to `superseded`, append one `superseded` Event Log line to the bottom of that prior handoff, and prepend `[SUPERSEDED]` to its MEMORY.md entry. Existing body lines are untouched; the only body write is the append-only Event Log line.
 
 ### Step 5: Write the handoff file
 
@@ -448,9 +495,27 @@ Verdict (compute, do NOT block on any verdict):
 - **STALE** = age > 7 days OR head not reachable OR branch deleted
 - **WARN** = anything else
 
-After computing the verdict, compute `last_verified_at = now()` and write it back to the selected handoff frontmatter. Do this only in RESTORE, immediately before printing the Step 3 receipt header. Do NOT run this write in SHOW.
+After computing the verdict, compute `last_verified_at = now()` and write it back to the selected handoff frontmatter. Then append one `restored` Event Log line to the selected handoff body. Do this only in RESTORE, immediately before printing the Step 3 receipt header. Do NOT run either write in SHOW.
 
 ```bash
+append_handoff_event() {
+  handoff_file="$1"
+  event_line="$2"
+
+  if grep -q '^### Event Log$' "$handoff_file"; then
+    cat >> "$handoff_file" <<EOF
+$event_line
+EOF
+  else
+    cat >> "$handoff_file" <<EOF
+
+### Event Log
+
+$event_line
+EOF
+  fi
+}
+
 ISO_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 if sed -n '2,/^---$/p' "$HANDOFF_FILE" | grep -q '^  last_verified_at:'; then
   sed -i.bak '2,/^---$/s/^  last_verified_at:.*$/  last_verified_at: "'"$ISO_NOW"'"/' "$HANDOFF_FILE"
@@ -460,17 +525,21 @@ else
 fi
 rm -f "$HANDOFF_FILE.bak"
 last_verified_at="$ISO_NOW"
+
+# VERDICT is the computed FRESH|WARN|STALE value from the staleness probe.
+RESTORE_SESSION_COLOR=${CURRENT_SESSION_COLOR:-unknown}
+append_handoff_event "$HANDOFF_FILE" "$ISO_NOW restored session=$RESTORE_SESSION_COLOR staleness=$VERDICT last_verified_at=$ISO_NOW"
 ```
 
-The sed range starts at line 2 so the opening `---` cannot close the range; it stops at the closing `---`. This mutates only frontmatter. Body content is untouched.
+The sed range starts at line 2 so the opening `---` cannot close the range; it stops at the closing `---`. This mutates only frontmatter. The body write is limited to the append-only Event Log line at the bottom of the file; it never uses `sed -i` or range replacement against body content.
 
 Post-processor tolerance: `last_verified_at` is a double-quoted ISO-8601 string, never `null`. To verify, write `last_verified_at: "2026-05-18T01:00:00Z"` with the same sed pattern, allow/simulate the auto-memory post-processor rewrite, then confirm `sed -n 's/^  last_verified_at: //p' "$HANDOFF_FILE" | head -1` still returns the field. Frontmatter reordering or injected metadata is acceptable as long as the field survives and `sed -n 's/^  KEY: //p'` continues to read it.
 
-Concurrent restore note: do not add locking. Two parallel restores may race this sed write; last-write-wins is accepted because both timestamps are verification times seconds apart and the body is untouched.
+Concurrent restore note: do not add locking. Two parallel restores may race the frontmatter write and append two restore Event Log lines. This is accepted because both timestamps are real verification events seconds apart, frontmatter remains last-write-wins, and Event Log is append-only.
 
 ### Step 3: Read-only restore receipt
 
-Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands`, print that section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. If the section is absent, omit the `Resume Commands` label and code block entirely. If the saved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely.
+Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands`, print that section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. If the section is absent, omit the `Resume Commands` label and code block entirely. If the saved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely. If the saved body contains `### Event Log`, print that section after Open loops and before First action; because RESTORE appends the `restored` line before receipt rendering, the receipt includes the current restore event. If the section is absent on an older handoff and append failed, omit the `Event Log` label rather than synthesizing lines.
 
 ````
 RESUMING HANDOFF <handoff_id>
@@ -509,6 +578,9 @@ Open loops:
   Next:                <items>
   Waiting:             <items>
   Drop / Did Not Do:   <items>
+
+Event Log:
+<event_log_lines verbatim, oldest first, including current restored event>
 
 First action (paste-ready prompt for your NEXT turn — restore does NOT execute):
 ┌─────────────────────────────────────────────
@@ -638,25 +710,27 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 
 ## Cross-feature notes
 
-- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; marks prior same-(repo+branch) in-progress handoffs as `superseded` (metadata-only mutation of `status:` field, body untouched). Save is the only flow that authors handoff body content: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance; the body-untouched restriction applies to later metadata-only operations and read-only flows. Optional Environment Hints are save-time body content, so no new HARD GATE exception is needed.
-- **Restore** writes only `last_verified_at:` to the selected handoff frontmatter after the staleness probe (metadata-only mutation, body untouched). It never writes to SYNC.md or MEMORY.md, never mutates the body, and never executes `first_action`, Resume Commands, or Environment Hints. If present, Resume Commands and Environment Hints are printed from the saved body only.
-- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the full saved body, optional Resume Commands and Environment Hints surface naturally there too.
+- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. Later body writes are limited to append-only Event Log lines.
+- **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, or Environment Hints. If present, Resume Commands, Environment Hints, and Event Log are printed from the saved body only after the restore append completes.
+- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the full saved body, optional Resume Commands, Environment Hints, and Event Log surface naturally there too.
 - **List** never writes anywhere. Print-only.
+- **Status marking** (`marked-shipped`, `marked-abandoned`) is an Event Log convention for explicit status-marking flows. Do not infer those events from MEMORY.md/SYNC.md prose; append them only when the handoff file's `status:` is explicitly changed to `shipped` or `abandoned`.
 
 ## Failure modes covered (from codex rigor review)
 
 - **F1:** Restore's option A prints first_action, never executes it. Execution requires a separate user turn.
 - **F2:** Default restore/show/list filter is `repo_root + branch`. Prevents NanoClaw/Dodami main-vs-main collision.
 - **F3:** Staleness probe includes dirty-drift comparison (saved vs current dirty file set + diff stat).
-- **F4:** `superseded` is in the status enum. Metadata-only mutations (`status:` supersession and restore-time `last_verified_at:` writes) are explicitly carved out from the append-only rule. Concurrent restores may race on `last_verified_at`; last-write-wins is accepted because competing values are verification timestamps seconds apart and body content remains untouched.
+- **F4:** `superseded` is in the status enum. Frontmatter mutations (`status:` supersession and restore-time `last_verified_at:` writes) are explicitly carved out from the no-arbitrary-file-mutation rule. Concurrent restores may race on `last_verified_at`; last-write-wins is accepted because competing values are verification timestamps seconds apart.
 - **F5:** Coordination-relevant predicate defined explicitly with 5 conditions (active_step / files_planned / dirty / open_prs / next_owner≠self).
 - **F6:** `gh pr list` is fail-open: missing/unauth gh → `open_prs: []` + `open_prs_probe_note`, save never aborts.
+- **F7:** Event Log is append-only body content. SAVE, RESTORE, supersession, and explicit status-marking flows may append lines; they must never edit, delete, sort, deduplicate, truncate, or rewrite existing Event Log lines. If the section is missing, create `### Event Log` at the bottom with `cat >> "$HANDOFF_FILE" <<EOF`; if it exists, append the new line at the bottom. SHOW and LIST must never write Event Log lines.
 
 ## Cuts applied (from codex simplicity review)
 
 - **C1:** v2.0 cut `/handoff show` because restore option B existed; v2.1 reverses this as a read-only, no-AUQ top-level flow for zero-friction body reads.
 - **C2:** Environment Hints is now adopted as an optional save-time body section. Restore/show print saved hints only; they never recompute or restore environment.
-- **C4:** Event Log body section remains deferred to a later v2.1 PR.
+- **C4:** Event Log is now adopted as an append-only body audit trail. SAVE writes `created`; supersession appends `superseded` to prior handoffs; RESTORE appends `restored`; SHOW/LIST remain read-only.
 - **C3:** Resume Commands is now adopted as an optional save-time body section. Restore/show print those commands only; they never execute them.
 - **C5:** Symbol Map is nested under Working Set (not a separate adopted feature).
 - **C6:** "Did NOT Do" merged into Open Loops `Drop / Did Not Do`.
