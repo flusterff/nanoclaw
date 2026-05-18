@@ -1,12 +1,13 @@
 ---
 name: handoff
 description: |
-  Save / restore / list cross-session handoffs. Captures git state, decisions, working
-  set, open loops + generates a copy-paste resume prompt. Symmetric restore: a fresh
-  session runs /handoff restore to load context as a read-only receipt before any edit.
+  Save / restore / show / list cross-session handoffs. Captures git state, decisions,
+  working set, open loops + generates a copy-paste resume prompt. Symmetric restore/show:
+  a fresh session runs /handoff restore to load a read-only receipt, or /handoff show
+  to print that receipt plus the full body without a prompt.
   Triggers on "handoff", "save and switch", "new session", "pick up later",
   "prepare handoff", "save progress for next session", "resume", "where was I",
-  "restore context", "list handoffs", "what handoffs do I have".
+  "restore context", "show handoff", "list handoffs", "what handoffs do I have".
 allowed-tools:
   - Bash
   - Read
@@ -19,9 +20,9 @@ allowed-tools:
 
 # /handoff — Cross-Session Handoff (v2)
 
-Manage handoffs with three subcommands: `save`, `restore`, `list`.
+Manage handoffs with four subcommands: `save`, `restore`, `show`, `list`.
 
-**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only mutation, body untouched). Restore is strictly read-only; restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation.
+**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only mutation, body untouched). Restore and show are strictly read-only; restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields (including any future `last_verified_at`).
 
 ## Subcommand routing
 
@@ -31,13 +32,19 @@ Parse the user's input in this priority order. Stop at the first match.
 
 - `/handoff save [<title>]` → **save**
 - `/handoff restore [<id|n|fragment>]` → **restore**
+- `/handoff show [<id|n|fragment>]` → **show**
 - `/handoff list [--all]` → **list**
+
+**Exception (codex review P3 fold):** `/handoff show handoffs` (plural noun, no other args) routes to **list**, NOT show. Check this before treating `handoffs` as a fragment selector. The multi-word list trigger takes precedence over the `show + arg` shape so that the legacy v2.0 phrase remains valid.
 
 ### 2. Natural-language trigger phrase (read-only intent gets read-only flow)
 
-When the args (or the user's surrounding message) match a restore/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
+When the args (or the user's surrounding message) match a restore/show/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume" or "show" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
+
+Evaluate exact multi-word triggers before bare `show`, so `show handoffs` remains list while `show handoff` routes show.
 
 - Restore triggers: `resume`, `where was i`, `pick up where i left off`, `restore context`, `resume context`, `resume work`, `continue session`
+- Show triggers: `show`, `show handoff`, `handoff show`
 - List triggers: `list handoffs`, `what handoffs do i have`, `show handoffs`, `handoff list`
 
 Match case-insensitively against the first few words of args (or the user message if args are empty).
@@ -379,6 +386,43 @@ If C: just exit.
 
 ---
 
+## SHOW flow (strict read-only — HARD GATE, no AskUserQuestion)
+
+Purpose: zero-friction restore option B. It prints the restore receipt header plus the full saved handoff body in one shot.
+
+### Step 1: Find target (reuse RESTORE Step 1)
+
+Use RESTORE Step 1 exactly for target resolution, treating `/handoff show [<id|n|fragment>]` as `/handoff restore [<id|n|fragment>]` for lookup only:
+
+- `/handoff show` (no arg) → same default as restore: newest handoff for current `repo_root + branch`.
+- `/handoff show <id>` → same exact `handoff_id` lookup as restore.
+- `/handoff show <n>` → same nth-most-recent lookup as restore.
+- `/handoff show <fragment>` → same broad title-fragment lookup as restore.
+
+Do NOT maintain a second copy of the target-resolution logic. If RESTORE Step 1 changes, SHOW inherits that behavior by reference.
+
+For explicit `<id|n|fragment>`, sanitize before lookup: reject selectors containing `/`, `\`, NUL, or `..`; then compare using an allowlisted selector (`A-Za-z0-9._ -`, max 120 chars). Treat the selector as data only. Never concatenate raw user input into a path.
+
+### Step 2: Build the read-only receipt header
+
+Run RESTORE Step 2's staleness probe and print RESTORE Step 3's receipt header. This may use read-only git commands and optional read-only `gh pr view` for PR state only.
+
+Compute `last_verified_at` for display only. Do NOT write `last_verified_at` or any other frontmatter field back to the handoff file.
+
+### Step 3: Print the full body and exit
+
+After the receipt header, print:
+
+```text
+--- Full handoff body ---
+<all non-frontmatter body text from the selected handoff>
+--- End handoff ---
+```
+
+Read the selected handoff file and print the body exactly as saved. Do not ask A/B/C. Do not call Edit/Write. Do not perform shell mutations (`sed -i`, redirects to files, temp-file writes, status updates) and do not make external API calls beyond optional read-only `gh pr view` from the staleness probe.
+
+---
+
 ## LIST flow
 
 ### Step 1: Collect candidates
@@ -445,12 +489,13 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 
 - **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; marks prior same-(repo+branch) in-progress handoffs as `superseded` (metadata-only mutation of `status:` field, body untouched).
 - **Restore** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only.
+- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow.
 - **List** never writes anywhere. Print-only.
 
 ## Failure modes covered (from codex rigor review)
 
 - **F1:** Restore's option A prints first_action, never executes it. Execution requires a separate user turn.
-- **F2:** Default restore/list filter is `repo_root + branch`. Prevents NanoClaw/Dodami main-vs-main collision.
+- **F2:** Default restore/show/list filter is `repo_root + branch`. Prevents NanoClaw/Dodami main-vs-main collision.
 - **F3:** Staleness probe includes dirty-drift comparison (saved vs current dirty file set + diff stat).
 - **F4:** `superseded` is in the status enum. Metadata-only mutation explicitly carved out from append-only rule.
 - **F5:** Coordination-relevant predicate defined explicitly with 5 conditions (active_step / files_planned / dirty / open_prs / next_owner≠self).
@@ -458,7 +503,7 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 
 ## Cuts applied (from codex simplicity review)
 
-- **C1:** No `/handoff show` subcommand. Use restore's option B.
+- **C1:** v2.0 cut `/handoff show` because restore option B existed; v2.1 reverses this as a read-only, no-AUQ top-level flow for zero-friction body reads.
 - **C2/C3/C4:** No Environment Hints / Resume Commands / Event Log body sections in v2.0. Deferred to v2.1 — each is cheaply addable as a single body section.
 - **C5:** Symbol Map is nested under Working Set (not a separate adopted feature).
 - **C6:** "Did NOT Do" merged into Open Loops `Drop / Did Not Do`.
