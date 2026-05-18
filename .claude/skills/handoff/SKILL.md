@@ -771,6 +771,12 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 
 ---
 
+## Hook integration
+
+Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.claude/settings.json` as a `PreCompact` hook. It is print-only: before Claude Code compacts context, it reminds the user to run `/handoff save` if in-progress work should survive compaction. It must never auto-run save or block compaction.
+
+---
+
 ## Cross-feature notes
 
 - **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. Later body writes are limited to append-only Event Log lines. If and only if `STASH_REQUESTED=true`, Save may additionally run the opt-in git mutation `git stash push -u -m "handoff_<handoff_id>"` after dirty capture; this is explicitly carved into the HARD GATE because it mutates git stash state and cleans the working tree.
