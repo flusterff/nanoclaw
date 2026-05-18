@@ -22,7 +22,7 @@ allowed-tools:
 
 Manage handoffs with four subcommands: `save`, `restore`, `show`, `list`.
 
-**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show is strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines.
+**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Explicit `/handoff save --stash` (or an explicit save-time `stash` keyword) is the only opt-in git mutation this skill may perform: when requested, SAVE may run `git stash push -u -m "handoff_<handoff_id>"` after capturing the dirty-tree capsule and before confirmation. This is a save-time side effect, not a restore-time action; it is never automatic, and restore/show only print a paste-ready `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` cue. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show is strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines.
 
 ## Subcommand routing
 
@@ -30,10 +30,12 @@ Parse the user's input in this priority order. Stop at the first match.
 
 ### 1. Explicit subcommand keyword
 
-- `/handoff save [<title>]` → **save**
+- `/handoff save [--stash] [<title>]` → **save**
 - `/handoff restore [<id|n|fragment>]` → **restore**
 - `/handoff show [<id|n|fragment>]` → **show**
 - `/handoff list [--all]` → **list**
+
+For SAVE only, `--stash` sets `STASH_REQUESTED=true` and is stripped from the title before title inference. Default is `STASH_REQUESTED=false`; there is no `--no-stash`.
 
 **Exception (codex review P3 fold):** `/handoff show handoffs` (plural noun, no other args) routes to **list**, NOT show. Check this before treating `handoffs` as a fragment selector. The multi-word list trigger takes precedence over the `show + arg` shape so that the legacy v2.0 phrase remains valid.
 
@@ -49,6 +51,8 @@ Evaluate exact multi-word triggers before bare `show`, so `show handoffs` remain
 
 Match case-insensitively against the first few words of args (or the user message if args are empty).
 
+Save-only stash modifiers: after routing resolves to SAVE, treat the explicit args `stash`, `with stash`, or `and stash` as `STASH_REQUESTED=true` and strip those words from the title before title inference. These modifiers do not override restore/show/list trigger matches. Do not ask an AskUserQuestion for stash capture; the flag/keyword is the entire opt-in surface.
+
 ### 3. Save defaults
 
 - `/handoff` (no args) → **save**, infer title from conversation
@@ -61,6 +65,12 @@ Match case-insensitively against the first few words of args (or the user messag
 ### Step 1: Pre-flight probe (bash, all fail-open)
 
 ```bash
+# STASH_REQUESTED is set by Subcommand routing for `/handoff save --stash`,
+# `stash`, `with stash`, or `and stash`. Default is no stash.
+: "${STASH_REQUESTED:=false}"
+STASH_REF=null
+STASH_NOTE=null
+
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "ERROR: not in a git repo"; exit 2; }
 BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
 HEAD_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -133,7 +143,7 @@ Skip this step entirely if:
 - The user provided specific constraints in this turn
 - Pre-flight detected rich body context (planned files, decisions in conversation)
 
-Otherwise, ONE AskUserQuestion: "Anything the new session must preserve that I might miss?" with a free-text field plus a skip option. The answer may override synthesized fields, including Resume Commands; do not add a second question for resume-command capture. Cap friction at ~30s.
+Otherwise, ONE AskUserQuestion: "Anything the new session must preserve that I might miss?" with a free-text field plus a skip option. The answer may override synthesized fields, including Resume Commands; do not add a second question for resume-command capture. It must not set or unset stash behavior; stash is controlled only by the explicit `--stash` flag or save-time stash keywords. Cap friction at ~30s.
 
 ### Step 3: Synthesize body sections from conversation context
 
@@ -365,7 +375,34 @@ Branch slug sanitize (allowlist + collision-safe; `/` must become `-` so `feat/f
 HANDOFF_FILE=~/.claude/projects/-Users-will-nanoclaw/memory/handoff_${HANDOFF_ID}.md
 ```
 
-If the resulting file path already exists (same-second double save), append a 4-char random suffix before `.md`.
+If the resulting file path already exists (same-second double save), append a 4-char random suffix before `.md`. Same-second duplicate stash messages are acceptable since restore uses git's message-search syntax.
+
+Optional named stash creation runs after dirty-tree capture (Step 1) and before writing the frontmatter below. It is opt-in via `STASH_REQUESTED=true` (from `--stash` or save-time stash keyword) and fail-open:
+
+```bash
+if [ "$STASH_REQUESTED" = true ] && [ "$DIRTY" = true ]; then
+  STASH_MESSAGE="handoff_${HANDOFF_ID}"
+  STASH_EXIT=0
+  # Use -u because DIRTY_FILES includes porcelain v2 `?` lines; untracked dirty
+  # work must travel with the named stash when stash capture is explicitly requested.
+  STASH_OUT=$(git stash push -u -m "$STASH_MESSAGE" 2>&1) || STASH_EXIT=$?
+
+  if [ "$STASH_EXIT" -eq 0 ]; then
+    STASH_REF="stash^{/${STASH_MESSAGE}}"
+    STASH_NOTE="stash created: ${STASH_REF}"
+  else
+    STASH_ERR=$(printf '%s\n' "$STASH_OUT" | head -1 | cut -c1-160)
+    [ -z "$STASH_ERR" ] && STASH_ERR="git stash push failed with exit ${STASH_EXIT}"
+    STASH_REF="ERROR: ${STASH_ERR}"
+    STASH_NOTE="stash failed — save continued: ${STASH_ERR}"
+  fi
+elif [ "$STASH_REQUESTED" = true ]; then
+  STASH_REF=null
+  STASH_NOTE="stash skipped — clean tree"
+fi
+```
+
+A stash failure must not abort the save. Capture stderr via `2>&1`, record the error string in `stash_ref`, keep writing the handoff, and surface the failure in confirmation.
 
 Frontmatter schema:
 
@@ -398,6 +435,7 @@ metadata:
   is_worktree: true | false        # true if current checkout is a git worktree (not main repo)
   dirty: true | false
   dirty_files: [<path>, ...]
+  stash_ref: "stash^{/handoff_<handoff_id>}"  # optional; success ref, or "ERROR: ..." if requested stash failed; omit when no stash was requested or clean-tree skip
   active_step: "<one-line — DOUBLE-QUOTED in case it contains : / # $ etc.>"
   first_action: "<one-line — DOUBLE-QUOTED — printed by restore, NEVER auto-executed>"
   next_owner: self | codex | will | external-wait
@@ -462,6 +500,7 @@ Print:
 - The paste-prompt block (fenced for easy copy)
 - SYNC.md status: written or `SYNC.md skip: <reason>`
 - MEMORY.md: updated
+- Stash status, only if requested: `stash created: stash^{/handoff_<handoff_id>}`, `stash skipped — clean tree`, or `stash failed — save continued: <error>`
 - Superseded count (if any)
 - "Next session: run `/handoff restore` to resume."
 
@@ -489,7 +528,7 @@ If no match in current `repo+branch` but matches exist elsewhere: print `No hand
 Compute:
 - **Branch check:** `saved.branch == CURRENT_BRANCH`?
 - **Head reachability:** is `saved.head` an ancestor of current HEAD? `git merge-base --is-ancestor <saved.head> HEAD 2>/dev/null`
-- **Dirty drift:** if `saved.dirty == true`, compare `saved.dirty_files` set to current `git status --porcelain` dirty file set + diff stat. Flag if changed.
+- **Dirty drift:** if `saved.dirty == true`, compare `saved.dirty_files` set to current `git status --porcelain` dirty file set + diff stat. If saved `stash_ref` exists and does not start with `ERROR:`, do not flag solely because the current working tree is clean; the dirty capsule may have been moved into the named stash. Do not verify the stash exists at restore time.
 - **PR check:** if `saved.open_prs` non-empty and `gh` available, query `gh pr view <n> --json state`; flag any MERGED or CLOSED.
 - **Age basis:** read `saved.last_verified_at` first; if missing (v2.0 handoff), fall back to `saved.saved_at`.
 - **Age:** `now - age_basis`.
@@ -560,7 +599,7 @@ Concurrent restore note: do not add locking. Two parallel restores may race the 
 
 ### Step 3: Read-only restore receipt
 
-Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands`, print that section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. If the section is absent, omit the `Resume Commands` label and code block entirely. If the saved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely. If the saved body contains `### Event Log`, print that section after Open loops and before First action; because RESTORE appends the `restored` line before receipt rendering, the receipt includes the current restore event. If the section is absent on an older handoff and append failed, omit the `Event Log` label rather than synthesizing lines.
+Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands` OR frontmatter has a successful `stash_ref` (present and not starting with `ERROR:`), print the Resume Commands section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. Print saved resume commands verbatim first, then append `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` when `stash_ref` is successful. If `stash_ref` starts with `ERROR:`, print one non-code line `Stash: creation failed during save — <stash_ref>` and do not print a pop command. If there are no saved resume commands and no successful stash_ref, omit the `Resume Commands` label and code block entirely. If the saved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely. If the saved body contains `### Event Log`, print that section after Open loops and before First action; because RESTORE appends the `restored` line before receipt rendering, the receipt includes the current restore event. If the section is absent on an older handoff and append failed, omit the `Event Log` label rather than synthesizing lines.
 
 ````
 RESUMING HANDOFF <handoff_id>
@@ -585,8 +624,11 @@ Working set (read first):
 
 Resume Commands (paste to wake this work up):
 ```bash
-<resume_commands verbatim>
+<resume_commands verbatim, if any>
+git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"
 ```
+
+Stash: creation failed during save — <stash_ref>
 
 Environment Hints:
   Pwd:                 <saved pwd>
@@ -731,9 +773,9 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 
 ## Cross-feature notes
 
-- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. Later body writes are limited to append-only Event Log lines.
-- **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, or Environment Hints. If present, Resume Commands, Environment Hints, and Event Log are printed from the saved body only after the restore append completes.
-- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the full saved body, optional Resume Commands, Environment Hints, and Event Log surface naturally there too.
+- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. Later body writes are limited to append-only Event Log lines. If and only if `STASH_REQUESTED=true`, Save may additionally run the opt-in git mutation `git stash push -u -m "handoff_<handoff_id>"` after dirty capture; this is explicitly carved into the HARD GATE because it mutates git stash state and cleans the working tree.
+- **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop. If present, Resume Commands, Environment Hints, and Event Log are printed from the saved body only after the restore append completes. If successful `stash_ref` is present, restore prints `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` as a paste-ready cue in Resume Commands and does not verify or pop it.
+- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the restore receipt plus the full saved body, optional Resume Commands, stash pop cue, Environment Hints, and Event Log surface naturally there too.
 - **List** never writes anywhere. Print-only.
 - **Status marking** (`marked-shipped`, `marked-abandoned`) is an Event Log convention for explicit status-marking flows. Do not infer those events from MEMORY.md/SYNC.md prose; append them only when the handoff file's `status:` is explicitly changed to `shipped` or `abandoned`.
 
@@ -746,6 +788,7 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 - **F5:** Coordination-relevant predicate defined explicitly with 5 conditions (active_step / files_planned / dirty / open_prs / next_owner≠self).
 - **F6:** `gh pr list` is fail-open: missing/unauth gh → `open_prs: []` + `open_prs_probe_note`, save never aborts.
 - **F7:** Event Log is append-only body content. SAVE, RESTORE, supersession, and explicit status-marking flows may append lines; they must never edit, delete, sort, deduplicate, truncate, or rewrite existing Event Log lines. If the section is missing, create `### Event Log` at the bottom with `cat >> "$HANDOFF_FILE" <<EOF`; if it exists, append the new line at the bottom. SHOW and LIST must never write Event Log lines.
+- **F8:** Named stash creation is opt-in and fail-open. `/handoff save --stash` or explicit save-time stash keywords run `git stash push -u -m "handoff_<handoff_id>"` only when `DIRTY=true`; clean trees print `stash skipped — clean tree`. If git stash fails, capture stderr, write `stash_ref: "ERROR: <message>"` for audit, print `stash failed — save continued`, and continue writing the handoff/MEMORY/SYNC entries.
 
 ## Cuts applied (from codex simplicity review)
 
