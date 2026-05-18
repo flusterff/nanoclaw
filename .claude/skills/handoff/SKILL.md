@@ -188,8 +188,13 @@ find_delta_parent() {
 
     [ "$P_REPO" = "$REPO_ROOT" ] || continue
     [ "$P_BRANCH" = "$BRANCH" ] || continue
+    # Codex review P2 fold: if newest matching handoff is shipped/abandoned,
+    # STOP — do NOT continue to older superseded handoffs (would silently
+    # delta against stale completed work). Terminal newest match = no delta
+    # parent eligible.
     case "$P_STATUS" in
       in-progress|superseded) ;;
+      shipped|abandoned) return 1 ;;
       *) continue ;;
     esac
     [ -n "$P_ID" ] || continue
