@@ -27,7 +27,7 @@ allowed-tools:
 
 Manage handoffs with six subcommands: `save`, `restore`, `show`, `replay`, `rules`, `list`.
 
-**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Explicit `/handoff save --stash` (or an explicit save-time `stash` keyword) is the only opt-in git mutation this skill may perform: when requested, SAVE may run `git stash push -u -m "handoff_<handoff_id>"` after capturing the dirty-tree capsule and before confirmation. This is a save-time side effect, not a restore-time action; it is never automatic, and restore/show only print a paste-ready `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` cue. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show, replay, and rules are strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines. Replay is SHOW-like, not RESTORE-like: it prints one selected Open Loops step plus relevant saved context, and does not write `last_verified_at`, append Event Log lines, mutate frontmatter, or call RESTORE's verification-write logic. Rules scans recent handoff files and prints candidate CLAUDE.md rule additions only; it never writes CLAUDE.md, project CLAUDE.md, MEMORY.md, SYNC.md, handoff files, or any other rule file.
+**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Explicit `/handoff save --stash` (or an explicit save-time `stash` keyword) is the only opt-in git mutation this skill may perform: when requested, SAVE may run `git stash push -u -m "handoff_<handoff_id>"` after capturing the dirty-tree capsule and before confirmation. This is a save-time side effect, not a restore-time action; it is never automatic, and restore/show only print a paste-ready `git -C "<saved repo_root>" stash pop "$(git -C "<saved repo_root>" stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` cue. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show, replay, and rules are strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines. Replay is SHOW-like, not RESTORE-like: it prints one selected Open Loops step plus relevant saved context, and does not write `last_verified_at`, append Event Log lines, mutate frontmatter, or call RESTORE's verification-write logic. Rules scans recent handoff files and prints candidate CLAUDE.md rule additions only; it never writes CLAUDE.md, project CLAUDE.md, MEMORY.md, SYNC.md, handoff files, or any other rule file.
 
 ## Subcommand routing
 
@@ -93,7 +93,22 @@ STASH_NOTE=null
 
 LAUNCH_CWD=""
 if { [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; } && [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
-  LAUNCH_CWD=$(sed -n '2p' "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys; line=sys.stdin.read().strip(); print(json.loads(line).get("cwd", "")) if line else None' 2>/dev/null)
+  # Codex review P1 fold: line 2 isn't always cwd (NanoClaw JSONLs have
+  # agent-color/last-prompt records early). Scan the first 20 records for
+  # the first non-empty `cwd` field.
+  LAUNCH_CWD=$(head -20 "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rec = json.loads(line)
+    except Exception:
+        continue
+    cwd = rec.get("cwd") or ""
+    if cwd:
+        print(cwd)
+        break' 2>/dev/null)
 fi
 normalize_repo_candidate() {
   [ -n "$REPO_CANDIDATE" ] || return 1
@@ -639,7 +654,22 @@ Print:
 HANDOFF_DIR=~/.claude/projects/-Users-will-nanoclaw/memory
 LAUNCH_CWD=""
 if { [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; } && [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
-  LAUNCH_CWD=$(sed -n '2p' "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys; line=sys.stdin.read().strip(); print(json.loads(line).get("cwd", "")) if line else None' 2>/dev/null)
+  # Codex review P1 fold: line 2 isn't always cwd (NanoClaw JSONLs have
+  # agent-color/last-prompt records early). Scan the first 20 records for
+  # the first non-empty `cwd` field.
+  LAUNCH_CWD=$(head -20 "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rec = json.loads(line)
+    except Exception:
+        continue
+    cwd = rec.get("cwd") or ""
+    if cwd:
+        print(cwd)
+        break' 2>/dev/null)
 fi
 normalize_repo_candidate() {
   [ -n "$REPO_CANDIDATE" ] || return 1
@@ -745,7 +775,7 @@ Before rendering the receipt, resolve delta pointer lines for RESTORE only. A se
 
 For those sections, locate the parent by scanning handoff frontmatter for `handoff_id == <parent-id>` (do not assume filename equals id), read the same section from that parent, and substitute the parent's section content into the restore receipt. If the parent section is itself a pointer, follow the chain one parent at a time. Bound recursion at `MAX_DELTA_HOPS=5`; if the limit is reached, leave the pointer line in place and print `(parent unreachable: recursion limit reached while resolving <section-name>)` under that section. If `parent_handoff` is missing, the parent id cannot be found, or the parent file is unreadable, leave the pointer line in place and print `(parent unreachable: <parent-id>; showing delta pointer)` under that section. SHOW does not run this inflation step.
 
-Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the resolved body contains `### Resume Commands` OR frontmatter has a successful `stash_ref` (present and not starting with `ERROR:`), print the Resume Commands section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. Print resolved saved resume commands verbatim first, then append `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` when `stash_ref` is successful. If `stash_ref` starts with `ERROR:`, print one non-code line `Stash: creation failed during save — <stash_ref>` and do not print a pop command. If there are no saved resume commands and no successful stash_ref, omit the `Resume Commands` label and code block entirely. If the resolved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely. If the saved body contains `### Event Log`, print that section after Open loops and before First action; because RESTORE appends the `restored` line before receipt rendering, the receipt includes the current restore event. Event Log is always written full and is never resolved through delta pointers. If the section is absent on an older handoff and append failed, omit the `Event Log` label rather than synthesizing lines.
+Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the resolved body contains `### Resume Commands` OR frontmatter has a successful `stash_ref` (present and not starting with `ERROR:`), print the Resume Commands section after Working set and before Environment Hints/Open loops as a separate fenced `bash` block. Print resolved saved resume commands verbatim first, then append `git -C "<saved repo_root>" stash pop "$(git -C "<saved repo_root>" stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` when `stash_ref` is successful. If `stash_ref` starts with `ERROR:`, print one non-code line `Stash: creation failed during save — <stash_ref>` and do not print a pop command. If there are no saved resume commands and no successful stash_ref, omit the `Resume Commands` label and code block entirely. If the resolved body contains `### Environment Hints`, print that section after Resume Commands and before Open loops. If the section is absent, omit the `Environment Hints` label and block entirely. If the saved body contains `### Event Log`, print that section after Open loops and before First action; because RESTORE appends the `restored` line before receipt rendering, the receipt includes the current restore event. Event Log is always written full and is never resolved through delta pointers. If the section is absent on an older handoff and append failed, omit the `Event Log` label rather than synthesizing lines.
 
 ````
 RESUMING HANDOFF <handoff_id>
@@ -771,7 +801,7 @@ Working set (read first):
 Resume Commands (paste to wake this work up):
 ```bash
 <resume_commands verbatim, if any>
-git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"
+git -C "<saved repo_root>" stash pop "$(git -C "<saved repo_root>" stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"
 ```
 
 Stash: creation failed during save — <stash_ref>
@@ -1241,7 +1271,22 @@ find ~/.claude/projects/-Users-will-nanoclaw/memory -maxdepth 1 -name "handoff_*
 ```bash
 LAUNCH_CWD=""
 if { [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; } && [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
-  LAUNCH_CWD=$(sed -n '2p' "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys; line=sys.stdin.read().strip(); print(json.loads(line).get("cwd", "")) if line else None' 2>/dev/null)
+  # Codex review P1 fold: line 2 isn't always cwd (NanoClaw JSONLs have
+  # agent-color/last-prompt records early). Scan the first 20 records for
+  # the first non-empty `cwd` field.
+  LAUNCH_CWD=$(head -20 "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rec = json.loads(line)
+    except Exception:
+        continue
+    cwd = rec.get("cwd") or ""
+    if cwd:
+        print(cwd)
+        break' 2>/dev/null)
 fi
 normalize_repo_candidate() {
   [ -n "$REPO_CANDIDATE" ] || return 1
@@ -1312,7 +1357,7 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 ## Cross-feature notes
 
 - **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. In delta mode, Save still writes a complete new handoff file, but eligible unchanged sections may contain only the parseable pointer line `<see parent_handoff: <id> for unchanged <section-name>>`; `parent_handoff` carries the chain for restore-time inflation. Later body writes are limited to append-only Event Log lines. If and only if `STASH_REQUESTED=true`, Save may additionally run the opt-in git mutation `git stash push -u -m "handoff_<handoff_id>"` after dirty capture; this is explicitly carved into the HARD GATE because it mutates git stash state and cleans the working tree.
-- **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop. Before printing the receipt, Restore inflates delta pointer sections through `parent_handoff` recursively up to 5 hops; if a parent is unreachable, it warns and prints the pointer line instead of failing. If present, Resume Commands, Environment Hints, and Event Log are printed from the resolved saved body only after the restore append completes. If successful `stash_ref` is present, restore prints `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` as a paste-ready cue in Resume Commands and does not verify or pop it.
+- **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop. Before printing the receipt, Restore inflates delta pointer sections through `parent_handoff` recursively up to 5 hops; if a parent is unreachable, it warns and prints the pointer line instead of failing. If present, Resume Commands, Environment Hints, and Event Log are printed from the resolved saved body only after the restore append completes. If successful `stash_ref` is present, restore prints `git -C "<saved repo_root>" stash pop "$(git -C "<saved repo_root>" stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` as a paste-ready cue in Resume Commands and does not verify or pop it.
 - **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the restore receipt plus the full saved body verbatim, optional Resume Commands, stash pop cue, Environment Hints, Event Log, and delta pointer lines surface naturally there too; Show does not resolve delta pointers.
 - **Replay** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, frontmatter, git, or anywhere else. Print-only; it is a SHOW-like focused read that reuses RESTORE Step 1 lookup only, filters saved `### Open Loops` to one Next item or the Waiting section, and prints terse saved context. Replay never writes `last_verified_at`, never appends a `restored` Event Log line, never resolves delta pointers through RESTORE, never asks AskUserQuestion, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop.
 - **Rules** never writes to SYNC.md, MEMORY.md, CLAUDE.md, project CLAUDE.md, the handoff file, the Event Log, frontmatter, git, or anywhere else. Print-only; it scans only recent `handoff_*.md` files in the handoff dir, counts simple shared-keyword patterns across Drop / Did Not Do, Blocked / Waiting, and frontmatter `do_not_do` entries, and prints candidate CLAUDE.md HARD RULE drafts for manual copy. Rules never proposes from fewer than 3 distinct handoffs, never uses embeddings/Levenshtein/ML, never asks AskUserQuestion, and never scans SYNC.md or MEMORY.md content.
