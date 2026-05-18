@@ -182,12 +182,29 @@ Sections to include (omit any that are empty — never write empty headers):
   project_uses_tool() {
     tool="$1"
 
+    # Codex review P2 fold: require tool-SPECIFIC evidence, not just
+    # "package.json exists". A repo using npm shouldn't surface pnpm/yarn
+    # versions just because `package.json` is present.
     case "$tool" in
-      node|npm|npx|pnpm|yarn|tsx|tsc|vitest)
+      node|npm|npx)
         [ -f "$REPO_ROOT/package.json" ] && return 0
         ;;
-      python|python3|pip|pip3|pytest)
+      pnpm)
+        [ -f "$REPO_ROOT/pnpm-lock.yaml" ] && return 0
+        ;;
+      yarn)
+        [ -f "$REPO_ROOT/yarn.lock" ] && return 0
+        ;;
+      tsx|tsc|vitest)
+        # Require explicit reference in package.json (script or dependency)
+        [ -f "$REPO_ROOT/package.json" ] && LC_ALL=C grep -q "\"$tool\"" "$REPO_ROOT/package.json" 2>/dev/null && return 0
+        ;;
+      python|python3|pip|pip3)
         [ -f "$REPO_ROOT/pyproject.toml" ] || [ -f "$REPO_ROOT/requirements.txt" ] || find "$REPO_ROOT" -maxdepth 3 -name '*.py' -print -quit 2>/dev/null | grep -q . && return 0
+        ;;
+      pytest)
+        # Require explicit pytest config or fixture rather than any .py file
+        { [ -f "$REPO_ROOT/pyproject.toml" ] && LC_ALL=C grep -q "pytest" "$REPO_ROOT/pyproject.toml" 2>/dev/null; } || [ -f "$REPO_ROOT/pytest.ini" ] || [ -f "$REPO_ROOT/conftest.py" ] && return 0
         ;;
       cargo|rustc)
         [ -f "$REPO_ROOT/Cargo.toml" ] && return 0
@@ -195,7 +212,10 @@ Sections to include (omit any that are empty — never write empty headers):
     esac
 
     find "$REPO_ROOT/bin" "$REPO_ROOT/scripts" -maxdepth 2 -type f \( -name "$tool" -o -path "*/bin/$tool" \) -print -quit 2>/dev/null | grep -q . && return 0
-    git -C "$REPO_ROOT" grep -I -q -E "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" -- ':!node_modules' ':!.git' 2>/dev/null && return 0
+    # Exclude the handoff skill's own prose (which lists every candidate
+    # tool) from the fallback grep — otherwise `go`/`make`/etc would always
+    # match.
+    git -C "$REPO_ROOT" grep -I -q -E "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" -- ':!node_modules' ':!.git' ':!.claude/skills/handoff/SKILL.md' 2>/dev/null && return 0
     git -C "$REPO_ROOT" log --all --format=%s --max-count=200 2>/dev/null | LC_ALL=C grep -Eiq "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" && return 0
     return 1
   }
