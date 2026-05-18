@@ -35,6 +35,8 @@ Parse the user's input in this priority order. Stop at the first match.
 - `/handoff show [<id|n|fragment>]` → **show**
 - `/handoff list [--all]` → **list**
 
+**Exception (codex review P3 fold):** `/handoff show handoffs` (plural noun, no other args) routes to **list**, NOT show. Check this before treating `handoffs` as a fragment selector. The multi-word list trigger takes precedence over the `show + arg` shape so that the legacy v2.0 phrase remains valid.
+
 ### 2. Natural-language trigger phrase (read-only intent gets read-only flow)
 
 When the args (or the user's surrounding message) match a restore/show/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume" or "show" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
