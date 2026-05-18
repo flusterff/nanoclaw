@@ -280,20 +280,23 @@ Sections to include (omit any that are empty — never write empty headers, exce
 # Append a lifecycle event to a handoff body. This helper never edits or deletes
 # existing body content. If an older handoff lacks the section, create the
 # section at the bottom, then append the event line.
+#
+# IMPORTANT: do NOT use positional dollar-1/dollar-2 args. The Skill tool
+# substitutes positional argument refs in the rendered SKILL.md BEFORE bash
+# sees it (same bug class as the awk supersession parser at line ~155).
+# Call with env-prefixed pseudo-args:
+#   EVENT_FILE=<path> EVENT_LINE=<text> append_handoff_event
 append_handoff_event() {
-  handoff_file="$1"
-  event_line="$2"
-
-  if grep -q '^### Event Log$' "$handoff_file"; then
-    cat >> "$handoff_file" <<EOF
-$event_line
+  if grep -q '^### Event Log$' "$EVENT_FILE"; then
+    cat >> "$EVENT_FILE" <<EOF
+$EVENT_LINE
 EOF
   else
-    cat >> "$handoff_file" <<EOF
+    cat >> "$EVENT_FILE" <<EOF
 
 ### Event Log
 
-$event_line
+$EVENT_LINE
 EOF
   fi
 }
@@ -338,7 +341,7 @@ for i in "${!SUPERSEDES[@]}"; do
   rm -f "$prior_file.bak"
 
   # Body mutation is limited to an append-only Event Log line.
-  append_handoff_event "$prior_file" "$ISO_NOW superseded by=$HANDOFF_ID"
+  EVENT_FILE="$prior_file" EVENT_LINE="$ISO_NOW superseded by=$HANDOFF_ID" append_handoff_event
 done
 ```
 
@@ -546,7 +549,7 @@ else
 fi
 [ -z "$CURRENT_SESSION_COLOR" ] && CURRENT_SESSION_COLOR=unknown
 RESTORE_SESSION_COLOR="$CURRENT_SESSION_COLOR"
-append_handoff_event "$HANDOFF_FILE" "$ISO_NOW restored session=$RESTORE_SESSION_COLOR staleness=$VERDICT last_verified_at=$ISO_NOW"
+EVENT_FILE="$HANDOFF_FILE" EVENT_LINE="$ISO_NOW restored session=$RESTORE_SESSION_COLOR staleness=$VERDICT last_verified_at=$ISO_NOW" append_handoff_event
 ```
 
 The sed range starts at line 2 so the opening `---` cannot close the range; it stops at the closing `---`. This mutates only frontmatter. The body write is limited to the append-only Event Log line at the bottom of the file; it never uses `sed -i` or range replacement against body content.
