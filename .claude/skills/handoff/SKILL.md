@@ -91,27 +91,39 @@ Save-only modifiers: after routing resolves to SAVE, treat the explicit args `st
 STASH_REF=null
 STASH_NOTE=null
 
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "ERROR: not in a git repo"; exit 2; }
-BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
-HEAD_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-BASE_COMMIT=$(git rev-parse --short "$(git merge-base HEAD main 2>/dev/null || git merge-base HEAD master 2>/dev/null || echo HEAD)" 2>/dev/null || echo unknown)
-UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo null)
+LAUNCH_CWD=""
+if { [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; } && [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+  LAUNCH_CWD=$(sed -n '2p' "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys; line=sys.stdin.read().strip(); print(json.loads(line).get("cwd", "")) if line else None' 2>/dev/null)
+fi
+normalize_repo_candidate() {
+  [ -n "$REPO_CANDIDATE" ] || return 1
+  git -C "$REPO_CANDIDATE" rev-parse --show-toplevel 2>/dev/null
+}
+REPO_ROOT=""
+for candidate in "$LAUNCH_CWD" "${PWD:-}" "$(pwd 2>/dev/null)"; do
+  REPO_ROOT=$(REPO_CANDIDATE="$candidate" normalize_repo_candidate) && [ -n "$REPO_ROOT" ] && break
+done
+[ -n "$REPO_ROOT" ] || { echo "ERROR: not in a git repo (checked Claude launch cwd, PWD, pwd)"; exit 2; }
+BRANCH=$(git -C "$REPO_ROOT" branch --show-current 2>/dev/null || echo unknown)
+HEAD_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
+BASE_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short "$(git -C "$REPO_ROOT" merge-base HEAD main 2>/dev/null || git -C "$REPO_ROOT" merge-base HEAD master 2>/dev/null || echo HEAD)" 2>/dev/null || echo unknown)
+UPSTREAM=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo null)
 # Keep porcelain output in a bash variable, not a temp file. Avoids /tmp clobber
 # under concurrent /handoff save invocations and keeps the skill's writes scoped
 # to memory dir + MEMORY.md + SYNC.md per the HARD GATE.
-STATUS_OUT=$(git status --porcelain=v2 --branch 2>/dev/null)
+STATUS_OUT=$(git -C "$REPO_ROOT" status --porcelain=v2 --branch 2>/dev/null)
 DIRTY_FILES=$(echo "$STATUS_OUT" | awk '/^[12u?] /{print $NF}' | head -50)
 [ -n "$DIRTY_FILES" ] && DIRTY=true || DIRTY=false
-# Use `git diff HEAD` (not bare `git diff`) so the Dirty Tree section captures
+# Use `git -C "$REPO_ROOT" diff HEAD` so the Dirty Tree section captures
 # BOTH staged AND unstaged hunks. Bare `git diff` only shows unstaged — a fully
 # staged dirty tree would render as empty diff in the saved handoff.
-DIFF_STAT=$(git diff HEAD --stat 2>/dev/null | tail -30)
-DIFF_NAMES=$(git diff HEAD --name-status 2>/dev/null | head -50)
-WORKTREES=$(git worktree list --porcelain 2>/dev/null)
+DIFF_STAT=$(git -C "$REPO_ROOT" diff HEAD --stat 2>/dev/null | tail -30)
+DIFF_NAMES=$(git -C "$REPO_ROOT" diff HEAD --name-status 2>/dev/null | head -50)
+WORKTREES=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null)
 WORKTREE_COUNT=$(echo "$WORKTREES" | awk '/^worktree /' | wc -l | tr -d ' ')
 # Detect sibling-worktree mode (git-common-dir != .git means we're in a worktree, not main repo).
 # IS_WORKTREE is what callers actually need; the actual checkout root is REPO_ROOT (above).
-COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+COMMON_DIR=$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)
 [ "$COMMON_DIR" = ".git" ] && IS_WORKTREE=false || IS_WORKTREE=true
 # Session color: per project CLAUDE.md, Codex-Claude sessions use the
 # codex-claude-session helper; other Claude sessions read .claude/session-color
@@ -135,7 +147,7 @@ fi
 #  (b) Distinguish three outcomes — "gh succeeded, no PRs" vs "gh succeeded with
 #      PRs" vs "gh ran but failed (transient/parse/offline)". A silent failure
 #      that looks like "no PRs" misleads the staleness probe at restore time.
-GH_REPO=$(git config --get remote.origin.url 2>/dev/null | sed -E 's|.*[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
+GH_REPO=$(git -C "$REPO_ROOT" config --get remote.origin.url 2>/dev/null | sed -E 's|.*[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
 if ! command -v gh >/dev/null 2>&1; then
   OPEN_PRS=""; PR_PROBE_NOTE="gh missing"
 elif ! gh auth status >/dev/null 2>&1; then
@@ -154,7 +166,7 @@ else
 fi
 ```
 
-If `git rev-parse --show-toplevel` fails, abort with a clear error before writing anything.
+Resolve `REPO_ROOT` by trying Claude Code's session-launch `cwd` from JSONL line 2 first when `CLAUDE_CODE_SESSION_ID` is available, then `$PWD`, then `pwd`; normalize each candidate with `git -C "$candidate" rev-parse --show-toplevel`. If all candidates fail, abort with a clear error before writing anything.
 
 ### Step 2: One-question capture override (optional, single AUQ)
 
@@ -498,7 +510,7 @@ if [ "$STASH_REQUESTED" = true ] && [ "$DIRTY" = true ]; then
   STASH_EXIT=0
   # Use -u because DIRTY_FILES includes porcelain v2 `?` lines; untracked dirty
   # work must travel with the named stash when stash capture is explicitly requested.
-  STASH_OUT=$(git stash push -u -m "$STASH_MESSAGE" 2>&1) || STASH_EXIT=$?
+  STASH_OUT=$(git -C "$REPO_ROOT" stash push -u -m "$STASH_MESSAGE" 2>&1) || STASH_EXIT=$?
 
   if [ "$STASH_EXIT" -eq 0 ]; then
     STASH_REF="stash^{/${STASH_MESSAGE}}"
@@ -625,8 +637,23 @@ Print:
 
 ```bash
 HANDOFF_DIR=~/.claude/projects/-Users-will-nanoclaw/memory
-CURRENT_REPO=$(git rev-parse --show-toplevel 2>/dev/null)
-CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
+LAUNCH_CWD=""
+if { [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; } && [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+  LAUNCH_CWD=$(sed -n '2p' "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys; line=sys.stdin.read().strip(); print(json.loads(line).get("cwd", "")) if line else None' 2>/dev/null)
+fi
+normalize_repo_candidate() {
+  [ -n "$REPO_CANDIDATE" ] || return 1
+  git -C "$REPO_CANDIDATE" rev-parse --show-toplevel 2>/dev/null
+}
+CURRENT_REPO=""
+for candidate in "$LAUNCH_CWD" "${PWD:-}" "$(pwd 2>/dev/null)"; do
+  CURRENT_REPO=$(REPO_CANDIDATE="$candidate" normalize_repo_candidate) && [ -n "$CURRENT_REPO" ] && break
+done
+if [ -n "$CURRENT_REPO" ]; then
+  CURRENT_BRANCH=$(git -C "$CURRENT_REPO" branch --show-current 2>/dev/null)
+else
+  CURRENT_BRANCH=""
+fi
 ```
 
 - `/handoff restore` (no arg) → newest `handoff_*.md` whose `repo_root` matches `CURRENT_REPO` AND `branch` matches `CURRENT_BRANCH`.
@@ -640,8 +667,8 @@ If no match in current `repo+branch` but matches exist elsewhere: print `No hand
 
 Compute:
 - **Branch check:** `saved.branch == CURRENT_BRANCH`?
-- **Head reachability:** is `saved.head` an ancestor of current HEAD? `git merge-base --is-ancestor <saved.head> HEAD 2>/dev/null`
-- **Dirty drift:** if `saved.dirty == true`, compare `saved.dirty_files` set to current `git status --porcelain` dirty file set + diff stat. If saved `stash_ref` exists and does not start with `ERROR:`, do not flag solely because the current working tree is clean; the dirty capsule may have been moved into the named stash. Do not verify the stash exists at restore time.
+- **Head reachability:** is `saved.head` an ancestor of current HEAD? `git -C "$CURRENT_REPO" merge-base --is-ancestor <saved.head> HEAD 2>/dev/null`
+- **Dirty drift:** if `saved.dirty == true`, compare `saved.dirty_files` set to current `git -C "$CURRENT_REPO" status --porcelain` dirty file set + `git -C "$CURRENT_REPO" diff HEAD --stat`. If saved `stash_ref` exists and does not start with `ERROR:`, do not flag solely because the current working tree is clean; the dirty capsule may have been moved into the named stash. Do not verify the stash exists at restore time.
 - **PR check:** if `saved.open_prs` non-empty and `gh` available, query `gh pr view <n> --json state`; flag any MERGED or CLOSED.
 - **Age basis:** read `saved.last_verified_at` first; if missing (v2.0 handoff), fall back to `saved.saved_at`.
 - **Age:** `now - age_basis`.
@@ -1212,8 +1239,23 @@ find ~/.claude/projects/-Users-will-nanoclaw/memory -maxdepth 1 -name "handoff_*
 ### Step 2: Filter
 
 ```bash
-CURRENT_REPO=$(git rev-parse --show-toplevel 2>/dev/null)
-CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
+LAUNCH_CWD=""
+if { [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; } && [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+  LAUNCH_CWD=$(sed -n '2p' "$HOME/.claude/projects/-Users-will-nanoclaw/${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | python3 -c 'import json, sys; line=sys.stdin.read().strip(); print(json.loads(line).get("cwd", "")) if line else None' 2>/dev/null)
+fi
+normalize_repo_candidate() {
+  [ -n "$REPO_CANDIDATE" ] || return 1
+  git -C "$REPO_CANDIDATE" rev-parse --show-toplevel 2>/dev/null
+}
+CURRENT_REPO=""
+for candidate in "$LAUNCH_CWD" "${PWD:-}" "$(pwd 2>/dev/null)"; do
+  CURRENT_REPO=$(REPO_CANDIDATE="$candidate" normalize_repo_candidate) && [ -n "$CURRENT_REPO" ] && break
+done
+if [ -n "$CURRENT_REPO" ]; then
+  CURRENT_BRANCH=$(git -C "$CURRENT_REPO" branch --show-current 2>/dev/null)
+else
+  CURRENT_BRANCH=""
+fi
 ```
 
 - Default: include only handoffs whose frontmatter `repo_root == CURRENT_REPO AND branch == CURRENT_BRANCH`.
@@ -1275,6 +1317,7 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 - **Replay** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, frontmatter, git, or anywhere else. Print-only; it is a SHOW-like focused read that reuses RESTORE Step 1 lookup only, filters saved `### Open Loops` to one Next item or the Waiting section, and prints terse saved context. Replay never writes `last_verified_at`, never appends a `restored` Event Log line, never resolves delta pointers through RESTORE, never asks AskUserQuestion, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop.
 - **Rules** never writes to SYNC.md, MEMORY.md, CLAUDE.md, project CLAUDE.md, the handoff file, the Event Log, frontmatter, git, or anywhere else. Print-only; it scans only recent `handoff_*.md` files in the handoff dir, counts simple shared-keyword patterns across Drop / Did Not Do, Blocked / Waiting, and frontmatter `do_not_do` entries, and prints candidate CLAUDE.md HARD RULE drafts for manual copy. Rules never proposes from fewer than 3 distinct handoffs, never uses embeddings/Levenshtein/ML, never asks AskUserQuestion, and never scans SYNC.md or MEMORY.md content.
 - **List** never writes anywhere. Print-only.
+- **Launch-dir anchor**: Save, restore/show/replay target lookup, and list resolve the active repo from Claude Code's session-launch cwd when available, then `$PWD`, then `pwd`; every candidate is normalized through `git -C "$candidate" rev-parse --show-toplevel`, and repo-scoped git probes/mutations run with `git -C "$REPO_ROOT"` or `git -C "$CURRENT_REPO"` so later Bash `cd` calls do not change the handoff scope.
 - **Status marking** (`marked-shipped`, `marked-abandoned`) is an Event Log convention for explicit status-marking flows. Do not infer those events from MEMORY.md/SYNC.md prose; append them only when the handoff file's `status:` is explicitly changed to `shipped` or `abandoned`.
 
 ## Failure modes covered (from codex rigor review)
