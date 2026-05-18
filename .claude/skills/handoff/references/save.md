@@ -58,12 +58,17 @@ WORKTREE_COUNT=$(echo "$WORKTREES" | awk '/^worktree /' | wc -l | tr -d ' ')
 # IS_WORKTREE is what callers actually need; the actual checkout root is REPO_ROOT (above).
 COMMON_DIR=$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)
 [ "$COMMON_DIR" = ".git" ] && IS_WORKTREE=false || IS_WORKTREE=true
-# Session color: inside Claude Code, only read .claude/session-color. Do not
-# invoke external session helpers from this Bash body; see
-# references/maintenance-history.md for pure Codex-Claude session notes.
-SESSION_COLOR=$(cat "$REPO_ROOT/.claude/session-color" 2>/dev/null || echo null)
-SOURCE_SESSION=claude
-if [ -z "$CLAUDE_CODE_SESSION_ID" ] && [ -z "$CLAUDECODE" ]; then
+# Session color: per project CLAUDE.md, Codex-Claude sessions use the
+# codex-claude-session helper; other Claude sessions read .claude/session-color
+# (the worktree default). Disambiguate via $CLAUDE_CODE_SESSION_ID — set by
+# Claude Code itself, absent in pure Codex sessions. (The helper alone is not
+# a disambiguator: it auto-creates a codex-<id> label even when called from
+# Claude Code, so its presence cannot prove Codex context.)
+if [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; then
+  SESSION_COLOR=$(cat "$REPO_ROOT/.claude/session-color" 2>/dev/null || echo null)
+  SOURCE_SESSION=claude
+else
+  SESSION_COLOR=$(/Users/will/.local/bin/codex-claude-session --root "$REPO_ROOT" 2>/dev/null | sed -n 's/^Color: //p')
   SOURCE_SESSION=codex-claude
 fi
 [ -z "$SESSION_COLOR" ] && SESSION_COLOR=null
@@ -277,10 +282,11 @@ Always write full: `### Summary`, `### Open Loops`, `### Event Log`, and the `##
     esac
 
     find "$REPO_ROOT/bin" "$REPO_ROOT/scripts" -maxdepth 2 -type f \( -name "$tool" -o -path "*/bin/$tool" \) -print -quit 2>/dev/null | grep -q . && return 0
-    # Exclude the handoff skill's own prose (which lists every candidate
-    # tool) from the fallback grep — otherwise `go`/`make`/etc would always
-    # match.
-    git -C "$REPO_ROOT" grep -I -q -E "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" -- ':!node_modules' ':!.git' ':!.claude/skills/handoff/SKILL.md' 2>/dev/null && return 0
+    # Exclude the handoff skill's own prose (SKILL.md AND references/*.md
+    # both list every candidate tool) from the fallback grep — otherwise
+    # `go`/`make`/etc would always match against the skill's own
+    # documentation.
+    git -C "$REPO_ROOT" grep -I -q -E "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" -- ':!node_modules' ':!.git' ':!.claude/skills/handoff' 2>/dev/null && return 0
     git -C "$REPO_ROOT" log --all --format=%s --max-count=200 2>/dev/null | LC_ALL=C grep -Eiq "(^|[^A-Za-z0-9_-])${tool}([^A-Za-z0-9_-]|$)" && return 0
     return 1
   }
@@ -469,45 +475,47 @@ Frontmatter schema:
 
 Treat the schema below as the SOURCE-OF-TRUTH SHAPE; the on-disk file may have `type` moved inside `metadata:`, `node_type: memory` injected, and `originSessionId` appended — that's the post-processor and is harmless. Read frontmatter with `sed -n 's/^  KEY: //p'` which is post-processor-tolerant.
 
+<!-- prettier-ignore-start -->
 ```yaml
 ---
 name: handoff_<timestamp>_<branch-slug>
-description: '<one-line for MEMORY.md index — ALWAYS DOUBLE-QUOTED>'
+description: "<one-line for MEMORY.md index — ALWAYS DOUBLE-QUOTED>"
 type: handoff
 metadata:
   handoff_id: <timestamp>_<branch-slug>
-  parent_handoff: <parent-handoff-id> # delta saves: required and used to resolve pointer lines; full saves: optional lineage only; omit if no parent (do NOT write `null`)
+  parent_handoff: <parent-handoff-id>  # delta saves: required and used to resolve pointer lines; full saves: optional lineage only; omit if no parent (do NOT write `null`)
   supersedes: [<id>, ...]
-  status: in-progress # one of: in-progress | shipped | abandoned | superseded
+  status: in-progress           # one of: in-progress | shipped | abandoned | superseded
   saved_at: <ISO-8601>
-  last_verified_at: '<ISO-8601>' # written only by restore after receipt render; omit on save/new files
+  last_verified_at: "<ISO-8601>"  # written only by restore after receipt render; omit on save/new files
   session_color: <color-or-null>
-  source_session: claude # or: codex-claude
+  source_session: claude         # or: codex-claude
   repo_root: <absolute path>
   branch: <name>
   head: <short SHA>
   upstream: <origin/branch-or-null>
   base_commit: <short SHA>
-  is_worktree: true | false # true if current checkout is a git worktree (not main repo)
+  is_worktree: true | false        # true if current checkout is a git worktree (not main repo)
   dirty: true | false
   dirty_files: [<path>, ...]
-  stash_ref: 'stash^{/handoff_<handoff_id>}' # optional; success ref, or "ERROR: ..." if requested stash failed; omit when no stash was requested or clean-tree skip
-  active_step: '<one-line — DOUBLE-QUOTED in case it contains : / # $ etc.>'
-  first_action: '<one-line — DOUBLE-QUOTED — printed by restore, NEVER auto-executed>'
+  stash_ref: "stash^{/handoff_<handoff_id>}"  # optional; success ref, or "ERROR: ..." if requested stash failed; omit when no stash was requested or clean-tree skip
+  active_step: "<one-line — DOUBLE-QUOTED in case it contains : / # $ etc.>"
+  first_action: "<one-line — DOUBLE-QUOTED — printed by restore, NEVER auto-executed>"
   next_owner: self | codex | will | external-wait
-  blocked_until: '<one-line condition>' # omit field if no blocker (do NOT write `null`)
+  blocked_until: "<one-line condition>"  # omit field if no blocker (do NOT write `null`)
   do_not_do:
-    - '<item 1 — DOUBLE-QUOTED if it contains : # $ etc.>'
-    - '<item 2>'
+    - "<item 1 — DOUBLE-QUOTED if it contains : # $ etc.>"
+    - "<item 2>"
   resume_mode: read-only | dry-run | execute
   open_prs:
-    - '#<N>|<url>' # PR numbers contain `#` — REQUIRES quoting
-  open_prs_probe_note: '<null-string-or-failure-message>' # always quoted; use the literal string "null" if no note
+    - "#<N>|<url>"  # PR numbers contain `#` — REQUIRES quoting
+  open_prs_probe_note: "<null-string-or-failure-message>"  # always quoted; use the literal string "null" if no note
   related_handoffs: [<id>, ...]
-  files_modified: [<path>, ...] # from dirty_files
-  files_planned: [<path>, ...] # synthesized from conversation
+  files_modified: [<path>, ...]   # from dirty_files
+  files_planned: [<path>, ...]    # synthesized from conversation
 ---
 ```
+<!-- prettier-ignore-end -->
 
 ### Step 6: Update MEMORY.md index (unconditional)
 

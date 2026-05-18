@@ -102,10 +102,14 @@ rm -f "$HANDOFF_FILE.bak"
 last_verified_at="$ISO_NOW"
 
 # VERDICT is the computed FRESH|WARN|STALE value from the staleness probe.
-# Inside Claude Code, only read .claude/session-color. Do not invoke external
-# session helpers from this Bash body; see references/maintenance-history.md for
-# pure Codex-Claude session notes.
-CURRENT_SESSION_COLOR=$(cat "$CURRENT_REPO/.claude/session-color" 2>/dev/null || echo null)
+# Codex review P2 fold: compute CURRENT_SESSION_COLOR here using the same
+# Claude/Codex-disambiguation logic as SAVE Step 1, so restore events
+# don't fall back to session=unknown.
+if [ -n "$CLAUDE_CODE_SESSION_ID" ] || [ -n "$CLAUDECODE" ]; then
+  CURRENT_SESSION_COLOR=$(cat "$CURRENT_REPO/.claude/session-color" 2>/dev/null || echo null)
+else
+  CURRENT_SESSION_COLOR=$(/Users/will/.local/bin/codex-claude-session --root "$CURRENT_REPO" 2>/dev/null | sed -n 's/^Color: //p')
+fi
 [ -z "$CURRENT_SESSION_COLOR" ] && CURRENT_SESSION_COLOR=unknown
 RESTORE_SESSION_COLOR="$CURRENT_SESSION_COLOR"
 EVENT_FILE="$HANDOFF_FILE" EVENT_LINE="$ISO_NOW restored session=$RESTORE_SESSION_COLOR staleness=$VERDICT last_verified_at=$ISO_NOW" append_handoff_event
