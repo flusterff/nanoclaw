@@ -320,10 +320,14 @@ for f in $PRIOR; do
   fi
 done
 
-# Run after HANDOFF_ID has been computed from the same timestamp + slug used for
-# the new handoff path in Step 5.
-: "${HANDOFF_ID:?set HANDOFF_ID before applying supersession}"
+# Codex review P1 fold: compute HANDOFF_ID here so the supersession event log
+# line can reference it. The same SLUG + timestamp are reused by Step 5 when
+# writing the new handoff file path — Step 5 must NOT recompute these.
 ISO_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+HANDOFF_TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+SLUG=$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | tr -s ' \t' '-' | tr -cd 'a-z0-9.-' | cut -c1-40)
+[ -z "$SLUG" ] && SLUG=unknown
+HANDOFF_ID="${HANDOFF_TIMESTAMP}_${SLUG}"
 
 for i in "${!SUPERSEDES[@]}"; do
   prior_id="${SUPERSEDES[$i]}"
@@ -346,11 +350,16 @@ Path: `~/.claude/projects/-Users-will-nanoclaw/memory/handoff_<YYYYMMDD-HHMMSS>_
 
 **Timestamp comes BEFORE branch slug.** This ensures plain filename sort = chronological order across all branches/repos, which is the canonical order for `list --all`. Sorting by branch slug first (the v0 design) breaks `--all` ordering across branches.
 
-Branch slug sanitize (allowlist + collision-safe; `/` must become `-` so `feat/foo` doesn't collide with `featfoo`):
+Branch slug sanitize (allowlist + collision-safe; `/` must become `-` so `feat/foo` doesn't collide with `featfoo`). **Note:** `SLUG`, `HANDOFF_TIMESTAMP`, and `HANDOFF_ID` are already computed at the top of Step 4 so the supersession event log line can reference them. Step 5 reuses the same values — do NOT recompute (it would drift the timestamp).
 
 ```bash
-SLUG=$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | tr -s ' \t' '-' | tr -cd 'a-z0-9.-' | cut -c1-40)
-[ -z "$SLUG" ] && SLUG=unknown
+# SLUG / HANDOFF_TIMESTAMP / HANDOFF_ID already set in Step 4. Shown here for
+# reference only; do not recompute:
+# SLUG=$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | tr -s ' \t' '-' | tr -cd 'a-z0-9.-' | cut -c1-40)
+# [ -z "$SLUG" ] && SLUG=unknown
+# HANDOFF_TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+# HANDOFF_ID="${HANDOFF_TIMESTAMP}_${SLUG}"
+HANDOFF_FILE=~/.claude/projects/-Users-will-nanoclaw/memory/handoff_${HANDOFF_ID}.md
 ```
 
 If the resulting file path already exists (same-second double save), append a 4-char random suffix before `.md`.
