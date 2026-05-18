@@ -1,13 +1,15 @@
 ---
 name: handoff
 description: |
-  Save / restore / show / list cross-session handoffs. Captures git state, decisions,
-  working set, open loops + generates a copy-paste resume prompt. Symmetric restore/show:
-  a fresh session runs /handoff restore to load a read-only receipt, or /handoff show
-  to print that receipt plus the full body without a prompt.
+  Save / restore / show / replay / list cross-session handoffs. Captures git state, decisions,
+  working set, open loops + generates a copy-paste resume prompt. Symmetric restore/show/replay:
+  a fresh session runs /handoff restore to load a read-only receipt, /handoff show
+  to print that receipt plus the full body without a prompt, or /handoff replay
+  to print one Open Loops step plus focused saved context.
   Triggers on "handoff", "save and switch", "new session", "pick up later",
   "prepare handoff", "save progress for next session", "resume", "where was I",
-  "restore context", "show handoff", "list handoffs", "what handoffs do I have".
+  "restore context", "show handoff", "replay handoff", "replay step",
+  "list handoffs", "what handoffs do I have".
 allowed-tools:
   - Bash
   - Read
@@ -20,9 +22,9 @@ allowed-tools:
 
 # /handoff — Cross-Session Handoff (v2)
 
-Manage handoffs with four subcommands: `save`, `restore`, `show`, `list`.
+Manage handoffs with five subcommands: `save`, `restore`, `show`, `replay`, `list`.
 
-**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Explicit `/handoff save --stash` (or an explicit save-time `stash` keyword) is the only opt-in git mutation this skill may perform: when requested, SAVE may run `git stash push -u -m "handoff_<handoff_id>"` after capturing the dirty-tree capsule and before confirmation. This is a save-time side effect, not a restore-time action; it is never automatic, and restore/show only print a paste-ready `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` cue. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show is strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines.
+**HARD GATE (applies to all subcommands):** This skill NEVER modifies code or arbitrary files. It writes ONLY: (1) new handoff files in the memory dir, (2) MEMORY.md index entries, (3) SYNC.md coordination entries when relevant, (4) `status:` field updates on superseded prior handoffs (metadata-only frontmatter mutation), (5) restore-time `last_verified_at:` field writes on the selected handoff (metadata-only frontmatter mutation), (6) append-only `### Event Log` body writes on handoff files for lifecycle audit events during SAVE, RESTORE, supersession, and explicit shipped/abandoned status marking. Explicit `/handoff save --stash` (or an explicit save-time `stash` keyword) is the only opt-in git mutation this skill may perform: when requested, SAVE may run `git stash push -u -m "handoff_<handoff_id>"` after capturing the dirty-tree capsule and before confirmation. This is a save-time side effect, not a restore-time action; it is never automatic, and restore/show only print a paste-ready `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` cue. Restore never executes the handoff: restoring a handoff with `first_action: edit X.py` prints that line as a paste-ready prompt for the user's NEXT turn — it does NOT execute it inside the skill invocation. The only restore writes are the `last_verified_at:` frontmatter write after the staleness probe plus one append-only `restored` Event Log line; show and replay are strictly read-only. Show prints the restore receipt plus the full saved body without AskUserQuestion, and does not write frontmatter fields or Event Log lines. Replay is SHOW-like, not RESTORE-like: it prints one selected Open Loops step plus relevant saved context, and does not write `last_verified_at`, append Event Log lines, mutate frontmatter, or call RESTORE's verification-write logic.
 
 ## Subcommand routing
 
@@ -33,21 +35,32 @@ Parse the user's input in this priority order. Stop at the first match.
 - `/handoff save [--stash] [--delta|--full] [<title>]` → **save**
 - `/handoff restore [<id|n|fragment>]` → **restore**
 - `/handoff show [<id|n|fragment>]` → **show**
+- `/handoff replay [<id|n|fragment>] [step=<N>|<fragment>]` → **replay**
 - `/handoff list [--all]` → **list**
 
 For SAVE only, `--stash` sets `STASH_REQUESTED=true`; `--delta` sets `DELTA_REQUESTED=true`; `--full` sets `FULL_REQUESTED=true`. Strip all recognized flags from the title before title inference. Defaults are `STASH_REQUESTED=false`, `DELTA_REQUESTED=false`, and `FULL_REQUESTED=false`; there is no `--no-stash`. If both `--delta` and `--full` are present, abort before Step 1 with a clear error because they are mutually exclusive.
+
+For REPLAY only, parse two selectors: `REPLAY_TARGET_SELECTOR` and `REPLAY_STEP_SELECTOR`. If no replay target is provided, use RESTORE Step 1's default newest current `repo_root + branch` target. If one token follows `replay`, treat it as the target selector and default `REPLAY_STEP_SELECTOR=1`. If two or more tokens follow `replay`, treat the first token as the target selector and the remaining text as the step selector. Accept both `step=<N|waiting|fragment>` and a bare step selector (`1`, `2`, `waiting`, or a fragment). Strip only the leading `step=` prefix from the step selector; target lookup still uses RESTORE Step 1.
 
 **Exception (codex review P3 fold):** `/handoff show handoffs` (plural noun, no other args) routes to **list**, NOT show. Check this before treating `handoffs` as a fragment selector. The multi-word list trigger takes precedence over the `show + arg` shape so that the legacy v2.0 phrase remains valid.
 
 ### 2. Natural-language trigger phrase (read-only intent gets read-only flow)
 
-When the args (or the user's surrounding message) match a restore/show/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume" or "show" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
+When the args (or the user's surrounding message) match a restore/show/replay/list trigger, route to that flow BEFORE the save-with-title fallback. A "resume", "show", or "replay" intent must NOT silently execute save and write a new handoff/MEMORY/SYNC entry.
 
-Evaluate exact multi-word triggers before bare `show`, so `show handoffs` remains list while `show handoff` routes show.
+Evaluate exact multi-word triggers before bare `show` or bare `replay`, so `show handoffs` remains list while `show handoff` routes show, and `replay step <N> of <id>` routes replay with an extracted step selector.
 
 - Restore triggers: `resume`, `where was i`, `pick up where i left off`, `restore context`, `resume context`, `resume work`, `continue session`
 - Show triggers: `show`, `show handoff`, `handoff show`
+- Replay triggers: `replay`, `handoff replay`, `replay handoff`, `replay step`
 - List triggers: `list handoffs`, `what handoffs do i have`, `show handoffs`, `handoff list`
+
+For natural-language replay forms, support at least:
+- `replay step <N|waiting|fragment> of <id|n|fragment>`
+- `replay <id|n|fragment> step <N|waiting|fragment>`
+- `replay <id|n|fragment> <N|waiting|fragment>`
+
+If a replay phrase omits the step selector, default to `1`. If a replay phrase omits the target selector, use RESTORE Step 1's default newest handoff for the current `repo_root + branch`.
 
 Match case-insensitively against the first few words of args (or the user message if args are empty).
 
@@ -808,6 +821,120 @@ Read the selected handoff file and print the body exactly as saved, including an
 
 ---
 
+## REPLAY flow (strict read-only — HARD GATE)
+
+Purpose: focused SHOW-like read for piecewise resumption. It prints exactly one replayable item from a handoff's `### Open Loops`, plus the smallest useful saved context for that item. It does not restore, verify, execute, or mutate the handoff.
+
+### Step 1: Find target (reuse RESTORE Step 1)
+
+Use RESTORE Step 1 exactly for target resolution, treating `/handoff replay [<id|n|fragment>] ...` as `/handoff restore [<id|n|fragment>]` for lookup only:
+
+- `/handoff replay` (no target arg) → same default as restore: newest handoff for current `repo_root + branch`.
+- `/handoff replay <id>` → same exact `handoff_id` lookup as restore.
+- `/handoff replay <n>` → same nth-most-recent lookup as restore.
+- `/handoff replay <fragment>` → same broad title-fragment lookup as restore.
+
+Do NOT maintain a second copy of the target-resolution logic. If RESTORE Step 1 changes, REPLAY inherits that behavior by reference.
+
+For explicit `<id|n|fragment>`, use the same selector sanitization as SHOW: reject selectors containing `/`, `\`, NUL, or `..`; then compare using an allowlisted selector (`A-Za-z0-9._ -`, max 120 chars). Treat the selector as data only. Never concatenate raw user input into a path.
+
+Do NOT run RESTORE Step 2's verification-write logic. Do NOT write `last_verified_at`, append a `restored` Event Log line, update MEMORY.md, update SYNC.md, call Edit/Write, use `sed -i`, redirect to files, or create temp files. Replay may run only read-only shell probes needed for target lookup and body parsing.
+
+### Step 2: Parse `step=` selector (number / fragment / `waiting`)
+
+Accepted explicit forms:
+
+- `/handoff replay` → target defaults via Step 1; `STEP_SELECTOR=1`
+- `/handoff replay <id|n|fragment>` → target from first arg; `STEP_SELECTOR=1`
+- `/handoff replay <id|n|fragment> step=<N|waiting|fragment>` → target from first arg; step from `step=...`
+- `/handoff replay <id|n|fragment> <N|waiting|fragment>` → target from first arg; step from the remaining text
+
+Accepted natural-language forms:
+
+- `replay step <N|waiting|fragment> of <id|n|fragment>`
+- `replay <id|n|fragment> step <N|waiting|fragment>`
+
+Normalize the step selector as follows:
+
+- If absent, use `1`.
+- If it starts with `step=`, strip that prefix once.
+- Trim surrounding whitespace and matching quotes.
+- Match `waiting` case-insensitively as the Waiting selector.
+- Match `^[0-9]+$` as a 1-indexed Next-entry number.
+- Otherwise treat the selector as a case-insensitive substring fragment for matching against Next-entry text.
+
+Do not ask AskUserQuestion on ambiguous selectors. If selection fails, use Step 4's empty-result fallback.
+
+### Step 3: Extract Open Loops, filter to selected step, and print terse output
+
+Read the selected handoff body exactly as saved, after the closing frontmatter `---`. Do not inflate delta pointer sections; replay is SHOW-like raw inspection, not RESTORE delta resolution.
+
+Locate the first `### Open Loops` section. The section ends at the next `### ` heading or end of file. Inside it:
+
+- `**Next:**` entries are markdown bullet items under the `**Next:**` label, in appearance order, until the next bold Open Loops label or section end. Number them 1-indexed.
+- `**Waiting:**` content is all lines under the `**Waiting:**` label until the next bold Open Loops label or section end.
+- Ignore `**Blocked:**` and `**Drop / Did Not Do:**` for step selection unless their text appears in the selected context through the normal Working Set matching below.
+
+Selection rules:
+
+- Numeric selector `N` → select Next entry #N.
+- Fragment selector → select the first Next entry whose full text contains the fragment as a case-insensitive substring.
+- `waiting` selector → select the entire Waiting section.
+
+Build relevant context from saved body only:
+
+- Task title: read `## Working on: <title>` from the body if present; otherwise use frontmatter `description`.
+- Working set context: read `### Working Set` as raw saved content. Print only lines that share at least one case-insensitive token with the selected step text. Tokens are file paths, identifiers, PR numbers, command names, or words of length 3+ after dropping common workflow words (`the`, `and`, `for`, `with`, `next`, `step`, `run`, `fix`, `add`, `update`, `review`). If no Working Set lines match, omit the block.
+- Resume command snippet: if `### Resume Commands` exists, print at most 3 command lines from its fenced bash block that share at least one selected-step token. If no command line matches, omit the block; do not invent commands.
+- First action: read frontmatter `first_action`. Print it only when the selected item is Next #1, including when a fragment selector matched Next #1. Do not print it for Waiting or later Next entries.
+
+Print in this exact terse shape, omitting optional empty blocks:
+
+```text
+REPLAY HANDOFF <handoff_id>
+Task: <title>
+Selected: <Next #N|Waiting> — <selected text>
+
+Working set context:
+  <matching Working Set lines>
+
+Resume command snippet (paste-ready; replay does NOT execute):
+<matching saved command lines>
+
+First action (paste-ready; replay does NOT execute):
+<first_action>
+```
+
+Do not print the full body. Do not print RESTORE's receipt. Do not ask A/B/C.
+
+### Step 4: Empty-result fallback
+
+If the handoff has no `### Open Loops` section, print exactly:
+
+```text
+No replayable steps in <handoff_id>
+```
+
+and exit.
+
+For numeric or fragment selectors, if there are no Next entries, the requested number is out of range, or no Next entry matches the fragment, print exactly:
+
+```text
+No replayable steps in <handoff_id>
+```
+
+and exit.
+
+For `waiting`, if the Waiting section is absent or empty, print exactly:
+
+```text
+No replayable steps in <handoff_id>
+```
+
+and exit.
+
+---
+
 ## LIST flow
 
 ### Step 1: Collect candidates
@@ -881,6 +1008,7 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 - **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; writes the new handoff body with an initial `created` Event Log line; marks prior same-(repo+branch) in-progress handoffs as `superseded` (frontmatter `status:` mutation) and appends one `superseded` Event Log line to each prior handoff. Save is the only flow that authors a new handoff body: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance. In delta mode, Save still writes a complete new handoff file, but eligible unchanged sections may contain only the parseable pointer line `<see parent_handoff: <id> for unchanged <section-name>>`; `parent_handoff` carries the chain for restore-time inflation. Later body writes are limited to append-only Event Log lines. If and only if `STASH_REQUESTED=true`, Save may additionally run the opt-in git mutation `git stash push -u -m "handoff_<handoff_id>"` after dirty capture; this is explicitly carved into the HARD GATE because it mutates git stash state and cleans the working tree.
 - **Restore** writes `last_verified_at:` to the selected handoff frontmatter after the staleness probe and appends one `restored` Event Log line to the selected handoff body. It never writes to SYNC.md or MEMORY.md, never edits or deletes existing body lines, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop. Before printing the receipt, Restore inflates delta pointer sections through `parent_handoff` recursively up to 5 hops; if a parent is unreachable, it warns and prints the pointer line instead of failing. If present, Resume Commands, Environment Hints, and Event Log are printed from the resolved saved body only after the restore append completes. If successful `stash_ref` is present, restore prints `git stash pop "$(git stash list | grep 'handoff_<handoff_id>' | head -1 | cut -d: -f1)"` as a paste-ready cue in Resume Commands and does not verify or pop it.
 - **Show** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the restore receipt plus the full saved body verbatim, optional Resume Commands, stash pop cue, Environment Hints, Event Log, and delta pointer lines surface naturally there too; Show does not resolve delta pointers.
+- **Replay** never writes to SYNC.md, MEMORY.md, the handoff file, the Event Log, frontmatter, git, or anywhere else. Print-only; it is a SHOW-like focused read that reuses RESTORE Step 1 lookup only, filters saved `### Open Loops` to one Next item or the Waiting section, and prints terse saved context. Replay never writes `last_verified_at`, never appends a `restored` Event Log line, never resolves delta pointers through RESTORE, never asks AskUserQuestion, and never executes `first_action`, Resume Commands, Environment Hints, or stash pop.
 - **List** never writes anywhere. Print-only.
 - **Status marking** (`marked-shipped`, `marked-abandoned`) is an Event Log convention for explicit status-marking flows. Do not infer those events from MEMORY.md/SYNC.md prose; append them only when the handoff file's `status:` is explicitly changed to `shipped` or `abandoned`.
 
@@ -895,8 +1023,11 @@ Tracked clones install `.claude/hooks/precompact-handoff-reminder.sh` through `.
 - **F7:** Event Log is append-only body content. SAVE, RESTORE, supersession, and explicit status-marking flows may append lines; they must never edit, delete, sort, deduplicate, truncate, or rewrite existing Event Log lines. If the section is missing, create `### Event Log` at the bottom with `cat >> "$HANDOFF_FILE" <<EOF`; if it exists, append the new line at the bottom. SHOW and LIST must never write Event Log lines.
 - **F8:** Delta parent unreachable fallback is fail-open at restore time. If a section pointer references a missing/unreadable parent, missing section, missing `parent_handoff`, or a chain deeper than 5 hops, RESTORE prints a warning and shows the delta pointer line instead of blocking or inventing content. SHOW always prints pointer lines verbatim.
 - **F9:** Named stash creation is opt-in and fail-open. `/handoff save --stash` or explicit save-time stash keywords run `git stash push -u -m "handoff_<handoff_id>"` only when `DIRTY=true`; clean trees print `stash skipped — clean tree`. If git stash fails, capture stderr, write `stash_ref: "ERROR: <message>"` for audit, print `stash failed — save continued`, and continue writing the handoff/MEMORY/SYNC entries.
+- **F10:** Replay is read-only and SHOW-like, not RESTORE-like. It reuses RESTORE Step 1 lookup by reference, then reads saved body content and filters `### Open Loops`; it must never call RESTORE Step 2's `last_verified_at` write, append a `restored` Event Log line, mutate frontmatter, or execute the selected step.
 
 ## Cuts applied (from codex simplicity review)
+
+Replay-from-step is new v2.1 read-only functionality, not a reversal of a v2.0 cut, so no new C-number is assigned for replay.
 
 - **C1:** v2.0 cut `/handoff show` because restore option B existed; v2.1 reverses this as a read-only, no-AUQ top-level flow for zero-friction body reads.
 - **C2:** Environment Hints is now adopted as an optional save-time body section. Restore/show print saved hints only; they never recompute or restore environment.
