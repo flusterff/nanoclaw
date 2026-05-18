@@ -133,7 +133,7 @@ Skip this step entirely if:
 - The user provided specific constraints in this turn
 - Pre-flight detected rich body context (planned files, decisions in conversation)
 
-Otherwise, ONE AskUserQuestion: "Anything the new session must preserve that I might miss?" with a free-text field plus a skip option. Cap friction at ~30s.
+Otherwise, ONE AskUserQuestion: "Anything the new session must preserve that I might miss?" with a free-text field plus a skip option. The answer may override synthesized fields, including Resume Commands; do not add a second question for resume-command capture. Cap friction at ~30s.
 
 ### Step 3: Synthesize body sections from conversation context
 
@@ -145,6 +145,12 @@ Sections to include (omit any that are empty — never write empty headers):
   - **Read-first:** ordered files+ranges (1-5 entries)
   - **Key symbols:** `file:line — function/class — why it matters` (max ~5)
   - **Do not touch:** files explicitly out of scope
+- `### Resume Commands`:
+  - Synthesize from conversation context at save time, plus the optional Step 2 override if provided.
+  - Capture 3-7 ordered shell commands the user or future session would run to wake the work back up (`cd`, `git checkout`, dev server start, `gh pr view`, `tail -f`, etc.).
+  - Write commands, not paragraphs, as one fenced `bash` block. Commands are paste-ready and are printed later; they are never auto-executed by restore/show.
+  - Do not capture secrets or secret-bearing command lines. If a needed command would include token/key values, write a `# <secret-redacted>` placeholder line instead.
+  - Omit the entire section if no actionable resume commands are inferable.
 - `### Open Loops`:
   - **Next:** concrete next actions (1-3)
   - **Waiting:** depends-on-external (PR / deploy / codex consult / Will)
@@ -359,9 +365,9 @@ Concurrent restore note: do not add locking. Two parallel restores may race this
 
 ### Step 3: Read-only restore receipt
 
-Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge):
+Print in this exact shape (the line `Reminder: write SYNC.md ... NOW` is the project CLAUDE.md HARD RULE nudge). If the saved body contains `### Resume Commands`, print that section after Working set and before Open loops as a separate fenced `bash` block. If the section is absent, omit the `Resume Commands` label and code block entirely.
 
-```
+````
 RESUMING HANDOFF <handoff_id>
 ════════════════════════════════════════
 Task:         <title>
@@ -382,6 +388,11 @@ Working set (read first):
   2. <file:line> — <why>
   ...
 
+Resume Commands (paste to wake this work up):
+```bash
+<resume_commands verbatim>
+```
+
 Open loops:
   Next:                <items>
   Waiting:             <items>
@@ -394,7 +405,7 @@ First action (paste-ready prompt for your NEXT turn — restore does NOT execute
 
 --- Receipt confirmed. ---
 Reminder: write a SYNC.md 🔄 IN PROGRESS entry NOW before edits (project CLAUDE.md HARD RULE).
-```
+````
 
 ### Step 4: Single AskUserQuestion — strict read-only options
 
@@ -515,9 +526,9 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 
 ## Cross-feature notes
 
-- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; marks prior same-(repo+branch) in-progress handoffs as `superseded` (metadata-only mutation of `status:` field, body untouched).
-- **Restore** writes only `last_verified_at:` to the selected handoff frontmatter after the staleness probe (metadata-only mutation, body untouched). It never writes to SYNC.md or MEMORY.md, never mutates the body, and never executes `first_action`.
-- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow.
+- **Save** updates MEMORY.md unconditionally; updates SYNC.md iff coordination-relevant predicate is true; marks prior same-(repo+branch) in-progress handoffs as `superseded` (metadata-only mutation of `status:` field, body untouched). Save is the only flow that authors handoff body content: initial body authoring is allowed by the HARD GATE's new-handoff-file write allowance; the body-untouched restriction applies to later metadata-only operations and read-only flows.
+- **Restore** writes only `last_verified_at:` to the selected handoff frontmatter after the staleness probe (metadata-only mutation, body untouched). It never writes to SYNC.md or MEMORY.md, never mutates the body, and never executes `first_action` or Resume Commands. If present, Resume Commands are printed as a paste-ready fenced block only.
+- **Show** never writes to SYNC.md, MEMORY.md, the handoff file, or anywhere else. Print-only; it is restore option B exposed as a no-AUQ top-level flow. Because show prints the full saved body, optional Resume Commands surface naturally there too.
 - **List** never writes anywhere. Print-only.
 
 ## Failure modes covered (from codex rigor review)
@@ -532,7 +543,8 @@ If no matches under `--all`: `No handoffs yet. Run /handoff to save your current
 ## Cuts applied (from codex simplicity review)
 
 - **C1:** v2.0 cut `/handoff show` because restore option B existed; v2.1 reverses this as a read-only, no-AUQ top-level flow for zero-friction body reads.
-- **C2/C3/C4:** No Environment Hints / Resume Commands / Event Log body sections in v2.0. Deferred to v2.1 — each is cheaply addable as a single body section.
+- **C2/C4:** No Environment Hints / Event Log body sections yet. Still deferred to later v2.1 PRs.
+- **C3:** Resume Commands is now adopted as an optional save-time body section. Restore/show print those commands only; they never execute them.
 - **C5:** Symbol Map is nested under Working Set (not a separate adopted feature).
 - **C6:** "Did NOT Do" merged into Open Loops `Drop / Did Not Do`.
 - **C7:** v2.0 computed `last_verified_at` at restore time without storing it. v2.1 reverses this only for restore: `/handoff restore` writes `last_verified_at` back to frontmatter as a metadata-only mutation; `/handoff save` still never writes it, and `/handoff show` remains read-only/display-only.
