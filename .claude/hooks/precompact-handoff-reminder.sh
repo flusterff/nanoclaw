@@ -4,5 +4,5 @@
 
 cat >/dev/null 2>&1 || true
 
-printf '%s\n' 'If you have in-progress work that should survive compaction, run `/handoff save` now (or `/handoff save <title>`).' >&2
+printf '%s\n' 'If you have in-progress work that should survive compaction, run `/handoff save` now (or `/handoff save <title>`).'
 exit 0
