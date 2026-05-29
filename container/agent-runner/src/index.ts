@@ -393,6 +393,8 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
+      model: 'claude-opus-4-8',
+      fallbackModel: 'claude-opus-4-7',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
