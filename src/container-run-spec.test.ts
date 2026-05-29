@@ -236,6 +236,7 @@ describe('buildContainerRunSpec args and env', () => {
 
     expect(apiKeySpec.env).toEqual([
       { name: 'TZ', value: 'America/Los_Angeles' },
+      { name: 'ANTHROPIC_MODEL', value: 'claude-opus-4-8' },
       {
         name: 'ANTHROPIC_BASE_URL',
         value: 'http://host.docker.internal:3001',
@@ -249,6 +250,7 @@ describe('buildContainerRunSpec args and env', () => {
 
     expect(oauthSpec.env).toEqual([
       { name: 'TZ', value: 'America/Los_Angeles' },
+      { name: 'ANTHROPIC_MODEL', value: 'claude-opus-4-8' },
       {
         name: 'ANTHROPIC_BASE_URL',
         value: 'http://host.docker.internal:3001',
@@ -289,6 +291,8 @@ describe('buildContainerRunSpec args and env', () => {
       'nanoclaw-test-group-123',
       '-e',
       'TZ=America/Los_Angeles',
+      '-e',
+      'ANTHROPIC_MODEL=claude-opus-4-8',
       '-e',
       'ANTHROPIC_BASE_URL=http://host.docker.internal:3001',
       '-e',
