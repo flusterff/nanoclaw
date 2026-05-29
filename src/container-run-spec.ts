@@ -122,6 +122,11 @@ export function buildContainerRunSpec(
 
   const baseEnv = [
     { name: 'TZ', value: input.runtime.timezone },
+    // Pin the agent model installation-wide. Shadow-proof: applies even to
+    // groups whose per-group agent-runner-src copy predates the source pin.
+    // A group that customizes its runner with an explicit `model` option still
+    // wins (SDK option > env var). See container-runner.ts per-group copy.
+    { name: 'ANTHROPIC_MODEL', value: 'claude-opus-4-8' },
     {
       name: 'ANTHROPIC_BASE_URL',
       value: `http://${input.runtime.credentialProxyHost}:${input.runtime.credentialProxyPort}`,
