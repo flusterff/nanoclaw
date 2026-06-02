@@ -1,0 +1,542 @@
+# Slack #ai-comms Context Capsule — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
+
+**Goal:** Give the always-on Will-AI Slack bot the originating session's context, mechanically, via a session-side deposit hook + host-side prompt injection.
+
+**Architecture:** A PreToolUse hook intercepts a session's `mcp__slack__conversations_add_message` to `#ai-comms`, deposits a "capsule" file (and enforces the `<@Chanhyeok>` mention). The NanoClaw host (`index.ts`) reads the live capsule pool and prepends it to the bot's prompt on each `#ai-comms` reply. Re-inject-while-fresh (no consume); fail-open both halves.
+
+**Tech Stack:** TypeScript (ESM, NodeNext), the repo's existing test runner (`*.test.ts`), Node `fs`/`crypto`.
+
+**Spec:** `docs/superpowers/specs/2026-06-02-slack-aicomms-context-capsule-design.md` (authoritative; this plan implements it).
+
+---
+
+### Task 1: Shared module — types, config, pure transforms (`parseBrief`, `ensureMention`, `computeCapsuleKey`)
+
+**Files:**
+- Create: `src/aicomms-capsule.ts`
+- Test: `src/aicomms-capsule.test.ts`
+
+- [ ] **Step 1: Write failing tests for the pure transforms**
+
+```ts
+import { describe, it, expect } from 'vitest';
+import {
+  parseBrief, ensureMention, computeCapsuleKey,
+  AICOMMS_CHANNEL_ID, CHANHYEOK_AI_USER_ID,
+} from './aicomms-capsule.js';
+
+describe('parseBrief', () => {
+  it('strips <brief> and returns its content', () => {
+    const r = parseBrief('Pushed scoresheet.\n<brief>why: needs review by EOD</brief>');
+    expect(r.brief).toBe('why: needs review by EOD');
+    expect(r.cleaned).toBe('Pushed scoresheet.');
+  });
+  it('returns null brief when absent', () => {
+    expect(parseBrief('plain text').brief).toBeNull();
+    expect(parseBrief('plain text').cleaned).toBe('plain text');
+  });
+});
+
+describe('ensureMention', () => {
+  const M = `<@${CHANHYEOK_AI_USER_ID}>`;
+  it('prepends the peer mention when absent', () => {
+    expect(ensureMention('review pls')).toBe(`${M} review pls`);
+  });
+  it('is idempotent when the exact mention is present', () => {
+    expect(ensureMention(`${M} review pls`)).toBe(`${M} review pls`);
+  });
+  it('does NOT inject when humans-only opt-out is present, and strips the tag', () => {
+    expect(ensureMention('<humans-only>note for Will')).toBe('note for Will');
+  });
+  it('still injects when a DIFFERENT user is mentioned but not the peer', () => {
+    expect(ensureMention('<@U0B392CRVKQ> fyi')).toBe(`${M} <@U0B392CRVKQ> fyi`);
+  });
+});
+
+describe('computeCapsuleKey', () => {
+  it('uses tool_use_id when present (sanitized)', () => {
+    expect(computeCapsuleKey({ channelId: 'C', session: null, cleanedText: 'x', toolUseId: 'toolu_01ABC' }))
+      .toBe('toolu_01ABC');
+  });
+  it('is deterministic from content when no tool_use_id', () => {
+    const a = computeCapsuleKey({ channelId: 'C', session: 'green', cleanedText: 'x' });
+    const b = computeCapsuleKey({ channelId: 'C', session: 'green', cleanedText: 'x' });
+    expect(a).toBe(b);
+    expect(a).not.toBe(computeCapsuleKey({ channelId: 'C', session: 'green', cleanedText: 'y' }));
+  });
+});
+```
+
+- [ ] **Step 2: Run tests; verify they FAIL** — `npm test -- src/aicomms-capsule.test.ts` → FAIL (module/exports missing).
+
+- [ ] **Step 3: Implement the module head (types, config, pure transforms)**
+
+```ts
+// src/aicomms-capsule.ts
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
+export const AICOMMS_CHANNEL_ID = 'C0B3EPK1XCL';
+export const CHANHYEOK_AI_USER_ID = 'U0B3B7CCEQJ';
+const CHANHYEOK_MENTION = `<@${CHANHYEOK_AI_USER_ID}>`;
+const OPT_OUT_RE = /<(?:humans-only|no-ai-mention)>/i;
+const BRIEF_RE = /<brief>([\s\S]*?)<\/brief>/i;
+
+export interface Capsule {
+  capsule_id: string;
+  created_at: string; // ISO-8601
+  session: string | null;
+  channel_id: string;
+  posted_text: string;
+  brief: string | null;
+}
+
+function expandHome(p: string): string {
+  return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p;
+}
+export function capsuleDir(): string {
+  const env = process.env.AICOMMS_CAPSULE_DIR;
+  return env ? expandHome(env) : path.join(os.homedir(), '.nanoclaw_aicomms_capsules');
+}
+export function windowMs(): number {
+  const h = Number(process.env.AICOMMS_CAPSULE_WINDOW_H);
+  return (Number.isFinite(h) && h > 0 ? h : 24) * 3_600_000;
+}
+export function maxCapsules(): number {
+  const n = Number(process.env.AICOMMS_CAPSULE_MAX);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+}
+
+export function parseBrief(text: string): { cleaned: string; brief: string | null } {
+  const m = text.match(BRIEF_RE);
+  if (!m) return { cleaned: text, brief: null };
+  const brief = m[1].trim();
+  const cleaned = text.replace(BRIEF_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+  return { cleaned, brief: brief || null };
+}
+
+export function ensureMention(text: string): string {
+  if (OPT_OUT_RE.test(text)) {
+    return text.replace(OPT_OUT_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  if (text.includes(CHANHYEOK_MENTION)) return text;
+  return `${CHANHYEOK_MENTION} ${text}`;
+}
+
+function sanitizeKey(k: string): string {
+  return k.replace(/[^A-Za-z0-9_-]/g, '_');
+}
+export function computeCapsuleKey(opts: {
+  channelId: string;
+  session: string | null;
+  cleanedText: string;
+  toolUseId?: string;
+}): string {
+  if (opts.toolUseId) return sanitizeKey(opts.toolUseId);
+  const h = crypto
+    .createHash('sha256')
+    .update(`${opts.channelId} ${opts.session ?? ''} ${opts.cleanedText}`)
+    .digest('hex')
+    .slice(0, 32);
+  return `h_${h}`;
+}
+```
+
+- [ ] **Step 4: Run tests; verify PASS** — `npm test -- src/aicomms-capsule.test.ts` → PASS.
+
+- [ ] **Step 5: Commit** — `git add src/aicomms-capsule.ts src/aicomms-capsule.test.ts && git commit -m "feat(aicomms): capsule module — types, config, pure transforms"`
+
+---
+
+### Task 2: Capsule store — `depositCapsule`, `pruneCapsules`, `readLiveCapsules`, `formatCapsuleBlock`, `injectCapsules`
+
+**Files:**
+- Modify: `src/aicomms-capsule.ts` (append)
+- Test: `src/aicomms-capsule.test.ts` (append)
+
+- [ ] **Step 1: Write failing tests (use a temp `AICOMMS_CAPSULE_DIR`)**
+
+```ts
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach } from 'vitest';
+import { depositCapsule, injectCapsules, readLiveCapsules } from './aicomms-capsule.js';
+
+let tmp: string;
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'capsule-'));
+  process.env.AICOMMS_CAPSULE_DIR = tmp;
+  delete process.env.AICOMMS_CAPSULE_WINDOW_H;
+  delete process.env.AICOMMS_CAPSULE_MAX;
+});
+afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); delete process.env.AICOMMS_CAPSULE_DIR; });
+
+const mk = (over = {}) => ({
+  capsule_id: 'k1', created_at: new Date().toISOString(), session: 'green',
+  channel_id: 'C0B3EPK1XCL', posted_text: 'pushed X', brief: null, ...over,
+});
+
+describe('depositCapsule', () => {
+  it('writes a capsule then no-ops on duplicate key', () => {
+    expect(depositCapsule(mk()).written).toBe(true);
+    expect(depositCapsule(mk({ posted_text: 'different' })).written).toBe(false); // same id
+    expect(readLiveCapsules().length).toBe(1);
+  });
+});
+
+describe('injectCapsules', () => {
+  it('returns prompt unchanged for non-ai-comms jids', () => {
+    depositCapsule(mk());
+    expect(injectCapsules('slack:COTHER', 'PROMPT')).toBe('PROMPT');
+  });
+  it('prepends a numbered <session-context> block for the ai-comms jid', () => {
+    depositCapsule(mk({ capsule_id: 'a', posted_text: 'older', created_at: new Date(Date.now() - 1000).toISOString() }));
+    depositCapsule(mk({ capsule_id: 'b', posted_text: 'newer' }));
+    const out = injectCapsules('slack:C0B3EPK1XCL', 'PROMPT');
+    expect(out).toContain('<session-context>');
+    expect(out).toContain('newer');
+    expect(out).toContain('older');
+    expect(out.indexOf('newer')).toBeLessThan(out.indexOf('older')); // newest first
+    expect(out.trimEnd().endsWith('PROMPT')).toBe(true);
+  });
+  it('returns prompt unchanged when no live capsules', () => {
+    expect(injectCapsules('slack:C0B3EPK1XCL', 'PROMPT')).toBe('PROMPT');
+  });
+  it('prunes + ignores capsules older than the window', () => {
+    process.env.AICOMMS_CAPSULE_WINDOW_H = '1';
+    depositCapsule(mk({ capsule_id: 'stale', created_at: new Date(Date.now() - 2 * 3600_000).toISOString() }));
+    expect(injectCapsules('slack:C0B3EPK1XCL', 'PROMPT')).toBe('PROMPT');
+    expect(fs.existsSync(path.join(tmp, 'stale.json'))).toBe(false); // pruned
+  });
+  it('caps at AICOMMS_CAPSULE_MAX newest', () => {
+    process.env.AICOMMS_CAPSULE_MAX = '2';
+    for (let i = 0; i < 4; i++) depositCapsule(mk({ capsule_id: `c${i}`, created_at: new Date(Date.now() - i * 1000).toISOString(), posted_text: `p${i}` }));
+    const out = injectCapsules('slack:C0B3EPK1XCL', 'PROMPT');
+    expect(out).toContain('p0'); expect(out).toContain('p1');
+    expect(out).not.toContain('p3');
+  });
+  it('fails open (returns prompt) if the store dir is unreadable', () => {
+    process.env.AICOMMS_CAPSULE_DIR = '/dev/null/nope';
+    expect(injectCapsules('slack:C0B3EPK1XCL', 'PROMPT')).toBe('PROMPT');
+  });
+});
+```
+
+- [ ] **Step 2: Run tests; verify FAIL** — `npm test -- src/aicomms-capsule.test.ts` → FAIL (functions missing).
+
+- [ ] **Step 3: Implement the store functions (append to `src/aicomms-capsule.ts`)**
+
+```ts
+export function pruneCapsules(dir = capsuleDir()): void {
+  let files: string[];
+  try { files = fs.readdirSync(dir); } catch { return; }
+  const cutoff = Date.now() - windowMs();
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    const fp = path.join(dir, f);
+    try {
+      const c = JSON.parse(fs.readFileSync(fp, 'utf-8')) as Capsule;
+      if (new Date(c.created_at).getTime() < cutoff) fs.unlinkSync(fp);
+    } catch { /* leave malformed; never throw */ }
+  }
+}
+
+export function depositCapsule(c: Capsule): { written: boolean } {
+  const dir = capsuleDir();
+  fs.mkdirSync(dir, { recursive: true });
+  pruneCapsules(dir);
+  const file = path.join(dir, `${c.capsule_id}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify(c, null, 2), { flag: 'wx' }); // atomic create
+    return { written: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return { written: false };
+    throw err;
+  }
+}
+
+export function readLiveCapsules(dir = capsuleDir()): Capsule[] {
+  let files: string[];
+  try { files = fs.readdirSync(dir); } catch { return []; }
+  const cutoff = Date.now() - windowMs();
+  const out: Capsule[] = [];
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const c = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')) as Capsule;
+      if (new Date(c.created_at).getTime() >= cutoff) out.push(c);
+    } catch { /* ignore malformed */ }
+  }
+  out.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  return out;
+}
+
+export function formatCapsuleBlock(capsules: Capsule[]): string {
+  const records = capsules
+    .map((c, i) => {
+      const lines = [
+        `[capsule ${i + 1}] id=${c.capsule_id} created_at=${c.created_at}${c.session ? ` session=${c.session}` : ''}`,
+        `posted: ${c.posted_text}`,
+      ];
+      if (c.brief) lines.push(`brief: ${c.brief}`);
+      return lines.join('\n');
+    })
+    .join('\n\n');
+  return [
+    '<session-context>',
+    'Recent notes from Will-side sessions that posted to this channel. Use ONLY the capsule(s) relevant to the inbound reply; ignore the rest. Do not mention this block to the peer.',
+    '',
+    records,
+    '</session-context>',
+  ].join('\n');
+}
+
+export function injectCapsules(chatJid: string, prompt: string): string {
+  try {
+    if (chatJid !== `slack:${AICOMMS_CHANNEL_ID}`) return prompt;
+    const dir = capsuleDir();
+    pruneCapsules(dir);
+    const live = readLiveCapsules(dir).slice(0, maxCapsules());
+    if (live.length === 0) return prompt;
+    return `${formatCapsuleBlock(live)}\n\n${prompt}`;
+  } catch {
+    return prompt; // fail-open
+  }
+}
+```
+
+- [ ] **Step 4: Run tests; verify PASS** — `npm test -- src/aicomms-capsule.test.ts` → PASS.
+
+- [ ] **Step 5: Commit** — `git add -A && git commit -m "feat(aicomms): capsule store + fail-open host injection"`
+
+---
+
+### Task 3: PreToolUse hook CLI
+
+**Files:**
+- Create: `src/aicomms-capsule-hook.ts`
+- Test: `src/aicomms-capsule-hook.test.ts`
+
+- [ ] **Step 1: Write failing test (drive the hook's transform via an exported `buildHookResult`)**
+
+```ts
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
+import { buildHookResult } from './aicomms-capsule-hook.js';
+import { readLiveCapsules, CHANHYEOK_AI_USER_ID } from './aicomms-capsule.js';
+
+let tmp: string;
+beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-')); process.env.AICOMMS_CAPSULE_DIR = tmp; });
+afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); delete process.env.AICOMMS_CAPSULE_DIR; });
+const M = `<@${CHANHYEOK_AI_USER_ID}>`;
+
+it('no-ops (no updatedInput, no capsule) for a non-ai-comms channel', () => {
+  const r = buildHookResult({ tool_use_id: 't1', tool_input: { channel_id: 'COTHER', text: 'hi' } });
+  expect(r).toBeNull();
+  expect(readLiveCapsules().length).toBe(0);
+});
+it('injects mention, strips <brief>, deposits capsule, returns updatedInput', () => {
+  const r = buildHookResult({ tool_use_id: 't2', tool_input: { channel_id: 'C0B3EPK1XCL', text: 'pushed\n<brief>why</brief>' } });
+  expect(r?.hookSpecificOutput.updatedInput.text).toBe(`${M} pushed`);
+  const caps = readLiveCapsules();
+  expect(caps.length).toBe(1);
+  expect(caps[0].brief).toBe('why');
+  expect(caps[0].posted_text).toBe(`${M} pushed`);
+});
+it('is idempotent on duplicate tool_use_id (single capsule)', () => {
+  buildHookResult({ tool_use_id: 'dup', tool_input: { channel_id: 'C0B3EPK1XCL', text: 'x' } });
+  buildHookResult({ tool_use_id: 'dup', tool_input: { channel_id: 'C0B3EPK1XCL', text: 'x' } });
+  expect(readLiveCapsules().length).toBe(1);
+});
+it('returns null updatedInput when text already has the exact mention (no rewrite) but still deposits', () => {
+  const r = buildHookResult({ tool_use_id: 't3', tool_input: { channel_id: 'C0B3EPK1XCL', text: `${M} ok` } });
+  expect(r).toBeNull(); // no change to text → no updatedInput needed
+  expect(readLiveCapsules().length).toBe(1);
+});
+```
+
+- [ ] **Step 2: Run tests; verify FAIL** — `npm test -- src/aicomms-capsule-hook.test.ts` → FAIL.
+
+- [ ] **Step 3: Implement the hook CLI**
+
+```ts
+// src/aicomms-capsule-hook.ts
+// PreToolUse hook: intercepts mcp__slack__conversations_add_message to #ai-comms.
+// Deposits a context capsule + enforces the <@Chanhyeok> mention. Fail-open.
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  AICOMMS_CHANNEL_ID, parseBrief, ensureMention, computeCapsuleKey, depositCapsule,
+} from './aicomms-capsule.js';
+
+export interface HookInput {
+  tool_use_id?: string;
+  tool_input?: { channel_id?: string; text?: string; [k: string]: unknown };
+}
+export interface HookResult {
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse';
+    permissionDecision: 'allow';
+    updatedInput: Record<string, unknown>;
+  };
+}
+
+function sessionColor(): string | null {
+  if (process.env.CLAUDE_SESSION_COLOR) return process.env.CLAUDE_SESSION_COLOR;
+  try {
+    const v = fs.readFileSync(path.join(process.cwd(), '.claude', 'session-color'), 'utf-8').trim();
+    return v || null;
+  } catch { return null; }
+}
+
+/** Pure-ish core: deposits the capsule (side effect) and returns a rewrite result, or null if no rewrite needed. */
+export function buildHookResult(input: HookInput): HookResult | null {
+  const ti = input.tool_input ?? {};
+  const channelId = ti.channel_id;
+  const rawText = typeof ti.text === 'string' ? ti.text : undefined;
+  if (channelId !== AICOMMS_CHANNEL_ID || rawText === undefined) return null;
+
+  const { cleaned, brief } = parseBrief(rawText);
+  const finalText = ensureMention(cleaned);
+  const session = sessionColor();
+  const capsule_id = computeCapsuleKey({ channelId, session, cleanedText: finalText, toolUseId: input.tool_use_id });
+  depositCapsule({
+    capsule_id, created_at: new Date().toISOString(), session,
+    channel_id: channelId, posted_text: finalText, brief,
+  });
+
+  if (finalText === rawText) return null; // nothing to rewrite
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      updatedInput: { ...ti, text: finalText },
+    },
+  };
+}
+
+function readStdin(): Promise<string> {
+  return new Promise((res, rej) => {
+    let d = ''; process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => (d += c));
+    process.stdin.on('end', () => res(d));
+    process.stdin.on('error', rej);
+  });
+}
+
+async function main(): Promise<void> {
+  let input: HookInput;
+  try { input = JSON.parse(await readStdin()); } catch { process.exit(0); } // fail-open: allow unchanged
+  try {
+    const result = buildHookResult(input!);
+    if (result) process.stdout.write(JSON.stringify(result));
+  } catch { /* fail-open */ }
+  process.exit(0);
+}
+
+// Only run main() when executed directly (not when imported by tests).
+if (process.argv[1] && process.argv[1].includes('aicomms-capsule-hook')) {
+  void main();
+}
+```
+
+- [ ] **Step 4: Run tests; verify PASS** — `npm test -- src/aicomms-capsule-hook.test.ts` → PASS.
+
+- [ ] **Step 5: Commit** — `git add -A && git commit -m "feat(aicomms): PreToolUse hook CLI (deposit + mention enforcement)"`
+
+---
+
+### Task 4: Wire host injection into `index.ts` (grep-first — Code Change Discipline)
+
+**Files:**
+- Modify: `src/index.ts`
+
+- [ ] **Step 1: Find every dispatch site** — `rg -n "decision\.prompt|runAgent\(" src/index.ts`. Expected: the new-container path (`runAgent(group, decision.prompt!, …)`, ~:218-220) and possibly a live-pipe path (`queue.sendMessage(chatJid, decision.prompt!)`). **Inject at every site that dispatches `decision.prompt` for the channel.** Read each site's surrounding function before editing.
+
+- [ ] **Step 2: Add the import** (top of `src/index.ts`, with the other local imports):
+
+```ts
+import { injectCapsules } from './aicomms-capsule.js';
+```
+
+- [ ] **Step 3: Wrap the prompt at each dispatch site.** New-container path:
+
+```ts
+// before: const output = await runAgent(group, decision.prompt!, chatJid, async (result) => {
+const injectedPrompt = injectCapsules(chatJid, decision.prompt!);
+const output = await runAgent(group, injectedPrompt, chatJid, async (result) => {
+```
+
+Live-pipe path (if present):
+
+```ts
+// before: queue.sendMessage(chatJid, decision.prompt!)
+queue.sendMessage(chatJid, injectCapsules(chatJid, decision.prompt!))
+```
+
+`injectCapsules` returns the prompt unchanged for any non-`slack:C0B3EPK1XCL` jid, so this is a no-op for all other groups. Do NOT mutate `decision` and do NOT touch `message-dispatch.ts` (keep it pure).
+
+- [ ] **Step 4: Build + run the full suite**
+
+Run: `npm run build && npm test`
+Expected: build clean; all tests pass (new + existing). Fix type/import errors.
+
+- [ ] **Step 5: Commit** — `git add -A && git commit -m "feat(aicomms): inject capsule pool into standing-bot prompt (index.ts)"`
+
+---
+
+### Task 5: Build the hook output + wire `~/.claude/settings.json`
+
+**Files:**
+- Modify: `~/.claude/settings.json` (user-global; outside the repo — present the diff for Will to apply/confirm)
+
+- [ ] **Step 1: Confirm the compiled hook path** — `npm run build` then `ls dist/aicomms-capsule-hook.js` (confirm the build emits it; adjust path to match `tsconfig` `outDir`).
+
+- [ ] **Step 2: Propose the settings.json PreToolUse block** (do not silently edit user-global config — show Will):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__slack__conversations_add_message",
+        "hooks": [{ "type": "command", "command": "node /Users/will/nanoclaw/dist/aicomms-capsule-hook.js" }]
+      }
+    ]
+  }
+}
+```
+
+(Merge into any existing `hooks.PreToolUse` array rather than overwriting.)
+
+- [ ] **Step 3: Manual fail-open sanity** — pipe a non-ai-comms payload through the hook and confirm empty stdout + exit 0:
+
+```bash
+echo '{"tool_use_id":"x","tool_input":{"channel_id":"COTHER","text":"hi"}}' | node /Users/will/nanoclaw/dist/aicomms-capsule-hook.js; echo "exit=$?"
+```
+Expected: no stdout, `exit=0`.
+
+---
+
+### Task 6: Gates — coordinated smoke + pre-merge codex review
+
+- [ ] **Step 1: Coordinated smoke** (so we don't spuriously ping Chanhyeok): post a benign test message via the MCP to `#ai-comms` (with `<humans-only>` to avoid pinging the peer) → confirm a capsule file appears in `$AICOMMS_CAPSULE_DIR` and the posted text is mention-free; then a normal test post → confirm `<@U0B3B7CCEQJ>` is present + capsule written. Inspect a built `decision.prompt` (debug log) to confirm `<session-context>` prepends. Clean up test capsules.
+
+- [ ] **Step 2: Pre-merge codex review** — `codex review --base origin/main -c model=gpt-5.5`. Address P0/P1.
+
+- [ ] **Step 3: Open PR** to `main` with the spec + plan linked.
+
+---
+
+## Self-review
+
+**Spec coverage:** §4 hook → Tasks 3,5. §5 host injection → Tasks 2,4. §6 lifecycle (window/cap/prune/no-consume) → Task 2. §7 schema → Task 1 (`Capsule`) + Task 2 (deposit). §8 guards: #1 pool+numbered (T2 format/inject), #2 never-delete (T2 inject), #3 mention (T1 ensureMention), #4 idempotency (T2 deposit `wx`, T3), #5 chunking (smoke T6), #6 re-inject (T4), #7 window+labels (T2), #8 inbound dedup (existing — confirm in smoke), #9 fail-open (T2 inject try/catch, T3 main). §9 tests → T1-3. §10 gates → T6. §11 config → T1. ✓ All covered.
+
+**Placeholder scan:** none — every code step has complete code; Task 4 uses grep-first because the live `index.ts` line numbers must be verified, but shows the exact edit at each site.
+
+**Type consistency:** `Capsule` fields (capsule_id/created_at/session/channel_id/posted_text/brief) identical across deposit, read, format, hook. `injectCapsules(chatJid, prompt)`, `buildHookResult(HookInput): HookResult | null`, `computeCapsuleKey({channelId,session,cleanedText,toolUseId?})` consistent T1↔T2↔T3↔T4. ✓
