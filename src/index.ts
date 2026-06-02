@@ -42,6 +42,7 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
+import { injectCapsules } from './aicomms-capsule.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc-watcher.js';
 import {
@@ -215,9 +216,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Prepend the #ai-comms session-context capsule pool (no-op for other jids).
+  const injectedPrompt = injectCapsules(chatJid, decision.prompt!);
   const output = await runAgent(
     group,
-    decision.prompt!,
+    injectedPrompt,
     chatJid,
     async (result) => {
       // Streaming output callback — called for each agent result
@@ -420,7 +423,10 @@ async function startMessageLoop(): Promise<void> {
 
           const liveDecision = decideLiveDispatch(
             decision,
-            queue.sendMessage(chatJid, decision.prompt!),
+            queue.sendMessage(
+              chatJid,
+              injectCapsules(chatJid, decision.prompt!),
+            ),
           );
 
           if (liveDecision.action === 'pipe') {
