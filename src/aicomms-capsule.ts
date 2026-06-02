@@ -12,6 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
+import { escapeXml } from './router.js';
+
 export const AICOMMS_CHANNEL_ID = 'C0B3EPK1XCL';
 export const CHANHYEOK_AI_USER_ID = 'U0B3B7CCEQJ';
 const CHANHYEOK_MENTION = `<@${CHANHYEOK_AI_USER_ID}>`;
@@ -168,13 +170,16 @@ export function readLiveCapsules(dir = capsuleDir()): Capsule[] {
 export function formatCapsuleBlock(capsules: Capsule[]): string {
   const records = capsules
     .map((c, i) => {
+      // Escape capsule content (Slack-sourced) so XML-like delimiters such as
+      // </session-context> or <message> can't reshape the hidden prompt block.
+      // Mirrors formatMessages' escaping (codex pre-merge review P2).
       const lines = [
         `[capsule ${i + 1}] id=${c.capsule_id} created_at=${c.created_at}${
-          c.session ? ` session=${c.session}` : ''
+          c.session ? ` session=${escapeXml(c.session)}` : ''
         }`,
-        `posted: ${c.posted_text}`,
+        `posted: ${escapeXml(c.posted_text)}`,
       ];
-      if (c.brief) lines.push(`brief: ${c.brief}`);
+      if (c.brief) lines.push(`brief: ${escapeXml(c.brief)}`);
       return lines.join('\n');
     })
     .join('\n\n');
