@@ -72,4 +72,15 @@ describe('buildHookResult', () => {
     expect(r?.hookSpecificOutput.updatedInput.channel_id).toBe(AICOMMS);
     expect(r?.hookSpecificOutput.updatedInput.thread_ts).toBe('123.456');
   });
+
+  it('strips <humans-only> and does NOT inject the peer mention (end-to-end)', () => {
+    const r = buildHookResult({
+      tool_use_id: 't5',
+      tool_input: { channel_id: AICOMMS, text: '<humans-only>note for Will' },
+    });
+    const text = r?.hookSpecificOutput.updatedInput.text as string;
+    expect(text).toBe('note for Will');
+    expect(text).not.toContain(M);
+    expect(readLiveCapsules()[0].posted_text).toBe('note for Will');
+  });
 });
