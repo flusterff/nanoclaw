@@ -56,6 +56,14 @@ def scan(path: pathlib.Path):
     else:
         findings.append(("WARN", "R3-표준규격(9)", f"H470={has470} cap452={has_cap452} — 카드형 전용 파일이면 무시"))
 
+    # R5: 열린 곡선 stroke path의 fill 누락 (원장 #9 — 검정 면채움)
+    bad_fill = [m[:70] for m in re.findall(r'<path [^>]*d="M[^"]*C[^"]*"[^>]*/>', src)
+                if "stroke=" in m and "fill" not in m]
+    if bad_fill:
+        findings.append(("FAIL", "R5-fill누락곡선(원장9)", f"{len(bad_fill)}건: " + bad_fill[0]))
+    else:
+        findings.append(("PASS", "R5-fill누락곡선(원장9)", "0건"))
+
     # R4: skin-tone hint
     skin = [hx for hx in SKIN_HEXES if hx.lower() in src.lower()]
     if skin:
