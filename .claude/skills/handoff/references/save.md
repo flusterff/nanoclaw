@@ -205,12 +205,13 @@ Delta save rule: synthesize the would-be full content for every section first, t
 
 `<see parent_handoff: <parent-id> for unchanged <section-name>>`
 
-Eligible for delta omission: `### Decisions Made`, `### Working Set`, `### Resume Commands`, `### Environment Hints`, `### Dirty Tree`, `### Worktree Map`.
+Eligible for delta omission: `### Decisions Made`, `### Deviations`, `### Working Set`, `### Resume Commands`, `### Environment Hints`, `### Dirty Tree`, `### Worktree Map`.
 
 Always write full: `### Summary`, `### Open Loops`, `### Event Log`, and the `## Working on: <title>` line. If the parent section is missing or unreadable at save time, write the new section content in full.
 
 - `## Working on: <title>` + `### Summary` (1-3 sentences)
 - `### Decisions Made` — bullets with "why" each
+- `### Deviations` — unspecified-spec decisions logged per user CLAUDE.md § Deviation log: one bullet per `DEVIATION:` line from this session (source: session scratchpad `deviations.md` or the task's SYNC entry), plus any proposed-but-not-yet-approved harness diffs. Omit only if no `DEVIATION:` lines were logged this session AND no proposed-but-unapproved harness diffs remain from the parent handoff; otherwise synthesize the section (delta comparison applies as usual).
 - `### Working Set`:
   - **Read-first:** ordered files+ranges (1-5 entries)
   - **Key symbols:** `file:line — function/class — why it matters` (max ~5)

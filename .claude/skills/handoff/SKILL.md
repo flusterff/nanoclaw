@@ -2,7 +2,7 @@
 name: handoff
 description: |
   Save / restore / show / replay / rules / list cross-session handoffs. Captures git state,
-  decisions, working set, open loops + generates a copy-paste resume prompt.
+  decisions, deviations, working set, open loops + generates a copy-paste resume prompt.
   Symmetric restore/show/replay plus rules surfacing: a fresh session runs /handoff restore
   to load a read-only receipt, /handoff show to print that receipt plus the full body
   without a prompt, /handoff replay to print one Open Loops step plus focused saved
